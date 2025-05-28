@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"flag"
 	"io"
 	"log"
@@ -14,27 +15,11 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 
+	"github.com/SBOsoft/SBOLogProcessor/handlers"
 	"github.com/SBOsoft/SBOLogProcessor/logparsers"
-	"github.com/SBOsoft/SBOLogProcessor/metrics"
 )
 
-type SBOLogProcessorConfig struct {
-	follow            bool
-	windowSizeMinutes int
-	//where 0=beginning -1=end and >0 means line number from beginning
-	startFrom int
-	//if domain name is not available in logs, e.g separate log file per domain configured
-	domainName string
-}
-
-const START_FROM_BEGINNING int = 0
-const START_FROM_END int = -1
-
-var globalConfig = SBOLogProcessorConfig{
-	follow:            false,
-	startFrom:         START_FROM_BEGINNING,
-	windowSizeMinutes: 1,
-	domainName:        ""}
+var globalConfig map[string]ConfigForAMonitoredFile
 
 func main() {
 	if len(os.Args) < 2 {
@@ -45,12 +30,12 @@ func main() {
 
 	var wg sync.WaitGroup
 
-	filePath := flag.Arg(0)
-	processFile(filePath, &wg)
+	for filePath, _ := range globalConfig {
+		wg.Add(1)
+		go processFile(filePath, &wg)
+	}
 
 	wg.Wait()
-
-	slog.Info("Currrent metrics", "allMetrics", metrics.GetAllMetrics())
 
 }
 
@@ -59,28 +44,51 @@ func parseCommandArgs() {
 	windowSizePtr := flag.Int("w", 1, "Statistics window size in minutes, e.g to report request statistics for every 5 minute window. Defaults to 300, 5 minute")
 	startFromPtr := flag.Int("s", START_FROM_BEGINNING, "When 0, file will be processed starting from the beginning. When -1, file will be processed starting from the end (i.e only lines appended after the program starts will be processed). Defaults to 0")
 	domainPtr := flag.String("d", "", "Domain name to report, needed when domain names are not available in logs")
+	handlerPtr := flag.String("h", "", "Enabled handler name, defaults to METRICS")
+	writeToFileTargetPtr := flag.String("t", "", "Target file path, required when handler is WRITE_TO_FILE")
 
 	flag.Parse()
 
-	globalConfig.follow = *followPtr
-	globalConfig.startFrom = *startFromPtr
-	/*
-		if globalConfig.startFrom != START_FROM_BEGINNING && globalConfig.startFrom != START_FROM_END {
-			slog.Warn("Invalid -s parameter, assuming 0", "invalidValue", globalConfig.startFrom)
-			globalConfig.startFrom = START_FROM_BEGINNING
-		}
-	*/
-	globalConfig.windowSizeMinutes = *windowSizePtr
+	globalConfig = make(map[string]ConfigForAMonitoredFile)
 
-	globalConfig.domainName = *domainPtr
+	var cfFromCmdLine = ConfigForAMonitoredFile{
+		Follow:                *followPtr,
+		StartFrom:             *startFromPtr,
+		TimeWindowSizeMinutes: *windowSizePtr,
+
+		DomainName: *domainPtr,
+
+		Handlers: []string{*handlerPtr},
+
+		FilePath:              flag.Arg(0),
+		WriteToFileTargetFile: *writeToFileTargetPtr,
+
+		HandlerInstances: make([]SBOLogHandlerInterface, 1),
+	}
+
+	globalConfig[cfFromCmdLine.FilePath] = cfFromCmdLine
+
+	globalConfig[cfFromCmdLine.FilePath].HandlerInstances[0] = createHandler(cfFromCmdLine.FilePath, cfFromCmdLine.Handlers[0])
 
 	slog.Info("Starting app with configuration", "config", globalConfig)
+}
+
+func createHandler(filePath string, handlerName string) SBOLogHandlerInterface {
+
+	switch {
+	case handlerName == handlers.WRITE_TO_FILE_HANDLER_NAME:
+		writeToFile := handlers.NewWriteToFileHandler()
+		err := writeToFile.Begin(globalConfig[filePath].WriteToFileTargetFile)
+		slog.Info("Created WriteToFileHandler", "error", err)
+		return writeToFile
+	}
+	slog.Warn("createHandler failed no handler for handler name", "handlerName", handlerName)
+	return nil
 }
 
 func processFile(filePath string, wg *sync.WaitGroup) {
 
 	lines := make(chan string, 10) // Buffered channel to prevent blocking
-	wg.Add(1)
 	wg.Add(1)
 	// Start consumer
 	go consumeLinesFromChannel(filePath, lines, wg)
@@ -108,6 +116,13 @@ func consumeLinesFromChannel(filePath string, theChannel chan string, wg *sync.W
 
 	defer wg.Done()
 
+	for _, handler := range globalConfig[filePath].Handlers {
+		switch handler {
+		case handlers.WRITE_TO_FILE_HANDLER_NAME:
+
+		}
+	}
+
 	slog.Debug("Start consumer in consumeLinesFromChannel", "filePath", filePath)
 	for line := range theChannel {
 		lineResult, parserFunction = processSingleLogLine(filePath, line, parserFunction)
@@ -116,13 +131,11 @@ func consumeLinesFromChannel(filePath string, theChannel chan string, wg *sync.W
 		} else {
 			errorCount++
 		}
-		/*
-			if processedLineCount%5 == 0 {
-				slog.Info("Currrent metrics", "allMetrics", metrics.GetAllMetricsForFile(filePath))
-			}
-		*/
 	}
-	slog.Info("Currrent metrics", "allMetrics", metrics.GetAllMetricsForFile(filePath))
+
+	for _, h := range globalConfig[filePath].HandlerInstances {
+		h.End()
+	}
 	slog.Info("consumeLinesFromChannel finished", "processedLineCount", processedLineCount, "errorCount", errorCount)
 
 }
@@ -163,7 +176,7 @@ func processSingleLogLine(filePath string, logLine string, parserFunction func(s
 		} else {
 			//slog.Debug("Parse success", "parsed", parseResult)
 			//now calculate stats
-			processMetricsForRequestLogEntry(filePath, parseResult)
+			callHandlersForRequestLogEntry(filePath, parseResult)
 			return true, parserFunction
 		}
 
@@ -171,12 +184,11 @@ func processSingleLogLine(filePath string, logLine string, parserFunction func(s
 	return false, parserFunction
 }
 
-func processMetricsForRequestLogEntry(filePath string, parseResult *logparsers.SBOHttpRequestLog) {
-	metrics.AddMetric(filePath, metrics.SBO_METRIC_REQ_COUNT, "", parseResult.Timestamp, 1)
-	metrics.AddMetric(filePath, metrics.SBO_METRIC_BYTES_SENT, "", parseResult.Timestamp, int64(parseResult.BytesSent))
-	metrics.AddMetric(filePath, metrics.SBO_METRIC_HTTP_STATUS, parseResult.Status, parseResult.Timestamp, 1)
-	metrics.AddMetric(filePath, metrics.SBO_METRIC_UNIQUE_IP, parseResult.ClientIP, parseResult.Timestamp, 1)
-	metrics.AddMetric(filePath, metrics.SBO_METRIC_METHOD, parseResult.Method, parseResult.Timestamp, 1)
+func callHandlersForRequestLogEntry(filePath string, parsedLogEntry *logparsers.SBOHttpRequestLog) {
+	//processMetricsForRequestLogEntry(filePath, parsedLogEntry)
+	for _, h := range globalConfig[filePath].HandlerInstances {
+		h.HandleEntry(parsedLogEntry)
+	}
 
 }
 
@@ -187,7 +199,7 @@ func produceLinesFromFile(filePath string, lines chan<- string) {
 	defer close(lines)
 
 	var watcherErr error
-	if globalConfig.follow {
+	if globalConfig[filePath].Follow {
 		watcher, watcherErr = fsnotify.NewWatcher()
 		if watcherErr != nil {
 			slog.Error("Error setting up fsnotify.NewWatcher", "filePath", filePath, "error", watcherErr)
@@ -222,9 +234,8 @@ func produceLinesFromFile(filePath string, lines chan<- string) {
 		if fileReader != nil {
 			if !waitingForNewData { //dont even try to read if just waiting
 				isFileAtEnd = readSingleLineFromFile(filePath, lines, fileReader)
-				if isFileAtEnd && !globalConfig.follow {
+				if isFileAtEnd && !globalConfig[filePath].Follow {
 					slog.Info("Finished reading the file and not following, so done...")
-					close(lines)
 					return
 				}
 				if isFileAtEnd {
@@ -242,7 +253,7 @@ func produceLinesFromFile(filePath string, lines chan<- string) {
 			break
 		}
 
-		if globalConfig.follow {
+		if globalConfig[filePath].Follow {
 			//slog.Warn("follow in produceLinesFromFile before select")
 			select {
 			case event, ok := <-watcher.Events:
@@ -317,7 +328,7 @@ func openFile(reopeningAfterRotate bool, filePath string) (error, *os.File, *buf
 		return err, file, fileReader
 	}
 
-	if reopeningAfterRotate || globalConfig.startFrom == START_FROM_BEGINNING {
+	if reopeningAfterRotate || globalConfig[filePath].StartFrom == START_FROM_BEGINNING {
 		// Seek to beginning if file exists
 		_, err = file.Seek(0, 0)
 		if err != nil {
@@ -325,7 +336,7 @@ func openFile(reopeningAfterRotate bool, filePath string) (error, *os.File, *buf
 			slog.Error("Error seeking to beginning of file", "filePath", filePath, "error", err)
 			return err, file, fileReader
 		}
-	} else if globalConfig.startFrom == START_FROM_END || globalConfig.startFrom < 0 {
+	} else if globalConfig[filePath].StartFrom == START_FROM_END || globalConfig[filePath].StartFrom < 0 {
 		// Seek to end if file exists
 		_, err = file.Seek(0, 2)
 		if err != nil {
@@ -340,7 +351,7 @@ func openFile(reopeningAfterRotate bool, filePath string) (error, *os.File, *buf
 		for {
 			_, err := fileReader.ReadString('\n')
 			lineNo++
-			if lineNo >= globalConfig.startFrom {
+			if lineNo >= globalConfig[filePath].StartFrom {
 				break
 			}
 			if err != nil {
@@ -378,4 +389,60 @@ func readSingleLineFromFile(filePath string, lines chan<- string, fileReader *bu
 		return io.EOF == err
 	}
 	return false
+}
+
+/////////////////////////Config
+
+const START_FROM_BEGINNING int = 0
+const START_FROM_END int = -1
+
+const (
+	HANDLER_METRICS   string = "metrics"
+	HANDLER_ATTACKERS string = "attackers"
+)
+
+type ConfigForAMonitoredFile struct {
+	Enabled                bool
+	FilePath               string
+	Handlers               []string
+	StartFrom              int
+	SkipIfLineMatchesRegex string
+	Follow                 bool
+	//if not available in logs
+	DomainName string
+	//used for metrics
+	TimeWindowSizeMinutes int
+	//used for logs "re-logged" to a different file. parsed log entries will be written as 1 json entry per line into this file
+	//only used by writetofile.go
+	WriteToFileTargetFile string
+	HandlerInstances      []SBOLogHandlerInterface
+}
+
+func LoadConfig(configFilePath string) map[string]ConfigForAMonitoredFile {
+	var configData []byte
+	var err error
+
+	configData, err = os.ReadFile(configFilePath)
+
+	if err != nil {
+		slog.Error("Failed to file config file", "configFilePath", configFilePath, "error", err)
+		return nil
+	}
+	var loadedConfig map[string]ConfigForAMonitoredFile
+	err = json.Unmarshal(configData, &loadedConfig)
+
+	if err != nil {
+		slog.Error("Failed to parse config loaded from file", "configFilePath", configFilePath, "error", err)
+		return nil
+	}
+
+	return loadedConfig
+}
+
+// ///////////////handlers
+type SBOLogHandlerInterface interface {
+	Name() string
+	//Begin(configOptions ...any) bool
+	HandleEntry(*logparsers.SBOHttpRequestLog) (bool, error)
+	End() bool
 }
