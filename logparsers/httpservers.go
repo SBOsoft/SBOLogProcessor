@@ -2,47 +2,112 @@ package logparsers
 
 import (
 	"errors"
+	"net/url"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
+)
+
+const (
+	REQUEST_MALICIOUS_UNKNOWN   int = 0
+	REQUEST_MALICIOUS_INVALID   int = 1
+	REQUEST_MALICIOUS_SQLINJ    int = 10
+	REQUEST_MALICIOUS_XSS       int = 20
+	REQUEST_MALICIOUS_TRAVERSAL int = 30
+	REQUEST_MALICIOUS_SCAN      int = 40
 )
 
 type SBOHttpRequestLog struct {
 	Domain   string
 	ClientIP string
 	//Remote logname (from identd, if supplied). This will return a dash unless mod_ident is present and IdentityCheck is set On.
-	RemoteLogname   string
-	RemoteUser      string
-	Timestamp       time.Time
-	Method          string
-	Path            string
-	Protocol        string
-	Status          string
-	BytesSent       int
-	Referer         string
-	RefererDomain   string
-	UserAgent       string
-	UserAgentFamily string
-	OSFamily        string
-	IsBot           bool
-	BotType         string
-	IsMalicious     bool
-	MaliciousType   string
+	RemoteLogname string
+	RemoteUser    string
+	Timestamp     time.Time
+	Method        string
+	Path          string
+	Protocol      string
+	Status        string
+	BytesSent     int
+	Referer       string
+	RefererDomain string
+	UserAgent     *SBOUserAgent
+	Malicious     int
 	//log timestamp is before the timestamps in previous lines. e.g we see logs from 18:01:33 then a log with timestamp 18:00:55 comes
 	//this indicates that this request took longer than others
 	IsOutOfOrder bool
 }
 
 func (sbol *SBOHttpRequestLog) SBOHttpRequestLogSetUserAgent(userAgent string) {
-	sbol.UserAgent = userAgent
+	sbol.UserAgent = NewSBOUserAgent(userAgent)
 }
 
 func (sbol *SBOHttpRequestLog) SBOHttpRequestLogSetReferer(referer string) {
-	sbol.Referer = referer
+	//sbol.Referer = referer
+	if len(referer) > 0 {
+		parsed, err := url.Parse(referer)
+
+		if err == nil {
+			sbol.Referer = parsed.Hostname()
+			sbol.Referer = strings.TrimPrefix(sbol.Referer, "www.")
+		}
+	}
 }
 
-func (sbol *SBOHttpRequestLog) SBOHttpRequestLogSetPath(requestedPath string) {
-	sbol.Path = requestedPath
+func (sbol *SBOHttpRequestLog) SBOHttpRequestLogSetPath(requestUri string) {
+
+	parsedurl, err := url.ParseRequestURI(requestUri)
+
+	if err != nil {
+		sbol.Malicious = REQUEST_MALICIOUS_INVALID
+		sbol.Path, _, _ = strings.Cut(requestUri, "?")
+		return
+	}
+
+	sbol.Path = parsedurl.Path
+
+	if isDirectoryTraversal(parsedurl.Path, requestUri) {
+		sbol.Malicious = REQUEST_MALICIOUS_TRAVERSAL
+	} else if isXSSAttempt(parsedurl.RawQuery) {
+		sbol.Malicious = REQUEST_MALICIOUS_XSS
+	} else if isSqlInjectionAttempt(parsedurl.RawQuery) {
+		sbol.Malicious = REQUEST_MALICIOUS_SQLINJ
+	}
+}
+
+func isDirectoryTraversal(parsedPath string, requestUriVerbatimFromLog string) bool {
+	if strings.Contains(parsedPath, "/../") || strings.Contains(requestUriVerbatimFromLog, "%00") {
+		return true
+	}
+
+	return false
+}
+
+/*
+TODO obviously far from ideal, just placeholders for now
+*/
+func isSqlInjectionAttempt(rawQueryString string) bool {
+	rx := regexp.MustCompile(`'.*(insert|update|exec|execute)`)
+	match := rx.FindString(rawQueryString)
+
+	if len(match) > 0 {
+		return true
+	}
+	return false
+}
+
+/*
+TODO obviously far from ideal, just placeholders for now
+*/
+func isXSSAttempt(rawQueryString string) bool {
+	rx := regexp.MustCompile(`<script|script>|alert|onmouseover|onmouseout`)
+	match := rx.FindString(rawQueryString)
+
+	if len(match) > 0 {
+		return true
+	}
+	return false
 }
 
 // CommonLogFormat parses a line in Common Log Format (CLF)
@@ -252,5 +317,3 @@ func ParseApacheTimestamp(timestamp string) (time.Time, error) {
 }
 
 var ErrInvalidLogFormat = errors.New("invalid log format")
-
-var LogParserErrors = errors.New("package errors")

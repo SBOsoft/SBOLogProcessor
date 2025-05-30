@@ -17,6 +17,12 @@ const SBO_METRIC_BYTES_SENT int = 2
 const SBO_METRIC_HTTP_STATUS int = 3
 const SBO_METRIC_UNIQUE_IP int = 4
 const SBO_METRIC_METHOD int = 5
+const SBO_METRIC_REFERER int = 6
+
+const SBO_METRIC_UA_FAMILY int = 11
+const SBO_METRIC_OS_FAMILY int = 12
+const SBO_METRIC_DEVICE_TYPE int = 13
+const SBO_METRIC_IS_HUMAN int = 14
 
 type SBOMetric struct {
 	//e.g path

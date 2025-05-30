@@ -81,6 +81,10 @@ func createHandler(filePath string, handlerName string) SBOLogHandlerInterface {
 		err := writeToFile.Begin(globalConfig[filePath].WriteToFileTargetFile)
 		slog.Info("Created WriteToFileHandler", "error", err)
 		return writeToFile
+	case handlerName == handlers.METRIC_GENERATOR_HANDLER_NAME:
+		metricsGenerator := handlers.NewMetricGeneratorHandler(filePath)
+		slog.Info("Created MetricGeneratorHandler")
+		return metricsGenerator
 	}
 	slog.Warn("createHandler failed no handler for handler name", "handlerName", handlerName)
 	return nil
