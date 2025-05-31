@@ -39,6 +39,7 @@ func PrintMetrics(filePath string) {
 	fmt.Print(str)
 }
 
+// TODO decide how we will save generated metrics
 func (handler *MetricGeneratorHandler) HandleEntry(parsedLogEntry *logparsers.SBOHttpRequestLog) (bool, error) {
 	metrics.AddMetric(handler.filePath, metrics.SBO_METRIC_REQ_COUNT, "", parsedLogEntry.Timestamp, 1)
 	metrics.AddMetric(handler.filePath, metrics.SBO_METRIC_BYTES_SENT, "", parsedLogEntry.Timestamp, int64(parsedLogEntry.BytesSent))
