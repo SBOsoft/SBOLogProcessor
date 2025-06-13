@@ -9,7 +9,7 @@ import (
 func TestSBOMetricTimeWindow(t *testing.T) {
 	timest := time.Date(2025, 11, 17, 20, 34, 58, 651387237, time.UTC)
 	sbom := NewSBOMetric(SBO_METRIC_REQ_COUNT, "aaa")
-	sbom.AddValue(timest, 100)
+	sbom.addValue("unittest", timest, 100)
 
 	slog.Warn("Values", "values", sbom.Values)
 

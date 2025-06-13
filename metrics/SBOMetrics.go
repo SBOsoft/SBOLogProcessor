@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"log/slog"
 	"regexp"
 	"slices"
 	"strconv"
@@ -17,6 +18,7 @@ var nonNumericRegex = regexp.MustCompile(`[^0-9]+`)
 type SBOMetricMap map[int]map[string]*SBOMetric
 
 var allMetrics map[string]SBOMetricMap = make(map[string]SBOMetricMap)
+var timeWindowTrackingMap map[string][]int64 = make(map[string][]int64, SBO_METRIC_VALUES_WINDOW_SIZE+1)
 
 const SBO_METRIC_REQ_COUNT int = 1
 const SBO_METRIC_BYTES_SENT int = 2
@@ -37,6 +39,24 @@ type SBOMetric struct {
 	keyCounter int
 }
 
+type SBOMetricWindowDataToBeSaved struct {
+	DomainName  string
+	FilePath    string
+	MetricType  int
+	KeyValue    string
+	TimeWindow  int64
+	MetricValue int64
+}
+
+func NewSBOMetricWindowDataToBeSaved(filePath string, metricType int, keyValue string, timeWindow int64, metricValue int64) *SBOMetricWindowDataToBeSaved {
+	//set DomainName later
+	rv := SBOMetricWindowDataToBeSaved{
+		FilePath:   filePath,
+		MetricType: metricType, KeyValue: keyValue,
+		TimeWindow: timeWindow, MetricValue: metricValue}
+	return &rv
+}
+
 func GetAllMetrics() map[string]SBOMetricMap {
 	return allMetrics
 }
@@ -51,7 +71,7 @@ func NewSBOMetric(metricType int, key string) *SBOMetric {
 	return &SBOMetric{ /* metricType, key, */ keys, values, 0}
 }
 
-func AddMetric(filePath string, metricType int, keyValue string, eventTimestamp time.Time, valueToAdd int64) (int64, int64) {
+func AddMetric(filePath string, metricType int, keyValue string, eventTimestamp time.Time, valueToAdd int64) *SBOMetricWindowDataToBeSaved {
 	mapForFile, ok := allMetrics[filePath]
 	if !ok {
 		mapForFile = make(map[int]map[string]*SBOMetric)
@@ -68,21 +88,77 @@ func AddMetric(filePath string, metricType int, keyValue string, eventTimestamp 
 		sbom = NewSBOMetric(metricType, keyValue)
 		keyMap[keyValue] = sbom
 	}
-	return sbom.AddValue(eventTimestamp, valueToAdd)
+	timeWindow, metricValue := sbom.addValue(filePath, eventTimestamp, valueToAdd)
+
+	if timeWindow > 0 {
+		return NewSBOMetricWindowDataToBeSaved(filePath, metricType, keyValue, timeWindow, metricValue)
+	} else {
+		return nil
+	}
 }
 
 func (sbm *SBOMetric) IncrementKeyCounter() {
 	sbm.keyCounter++
 }
 
+func CleanUpAllProcessKeyedValueTimeWindowTracking(filePath string, metricType int, dataToBeSavedChannel chan *SBOMetricWindowDataToBeSaved) {
+	for k, _ := range allMetrics[filePath][metricType] {
+		ProcessKeyedValueTimeWindowTracking(filePath, k, metricType, dataToBeSavedChannel)
+	}
+}
+
+func ProcessKeyedValueTimeWindowTracking(filePath string, keyValue string, metricType int, dataToBeSavedChannel chan *SBOMetricWindowDataToBeSaved) {
+	found := false
+	for _, tw := range timeWindowTrackingMap[filePath] {
+		tw64 := int64(tw)
+		if allMetrics[filePath][metricType][keyValue].Values[tw64] > 0 {
+			found = true
+		} else {
+			//remove timewindow entries and save if necessary
+			dataToBeSavedChannel <- NewSBOMetricWindowDataToBeSaved(filePath, metricType, keyValue, tw64, allMetrics[filePath][metricType][keyValue].Values[tw64])
+			delete(allMetrics[filePath][metricType][keyValue].Values, tw64)
+			slog.Debug("Remove expired entry in processKeyedValueTimeWindowTracking", "keyValue", keyValue, "metricType", metricType, "timeWindow", tw64)
+		}
+	}
+
+	//this key value does not have an entry for one of the current timewindow values
+	//so move it out of scope
+	if !found {
+		//remove the keyed value
+		delete(allMetrics[filePath][metricType], keyValue)
+		slog.Debug("Remove key value with no children in processKeyedValueTimeWindowTracking", "keyValue", keyValue, "metricType", metricType)
+	}
+}
+
+func doTimeWindowTracking(filePath string, timeWindow int64) {
+	if timeWindowTrackingMap[filePath] == nil {
+		timeWindowTrackingMap[filePath] = make([]int64, SBO_METRIC_VALUES_WINDOW_SIZE+1)
+	}
+
+	if slices.Contains(timeWindowTrackingMap[filePath], timeWindow) {
+		//nothing to do, it's already in
+		return
+	}
+	timeWindowTrackingMap[filePath] = append(timeWindowTrackingMap[filePath], timeWindow)
+	if len(timeWindowTrackingMap[filePath]) >= SBO_METRIC_VALUES_WINDOW_SIZE {
+		slices.Sort(timeWindowTrackingMap[filePath])
+
+		//oldestTimewindow := timeWindowTrackingMap[filePath][0]
+		timeWindowTrackingMap[filePath] = timeWindowTrackingMap[filePath][1:]
+	}
+	slog.Debug("doTimeWindowTracking", "timeWindowTrackingMap[filePath]", timeWindowTrackingMap[filePath])
+
+}
+
 /*
 return timeWindow and the metric value for that timeWindow when the timeWindow is removed out of scope
 the caller may want to save the removed timeWindow and the metric value
 */
-func (sbm *SBOMetric) AddValue(eventTimestamp time.Time, valueToAdd int64) (int64, int64) {
+func (sbm *SBOMetric) addValue(filePath string, eventTimestamp time.Time, valueToAdd int64) (int64, int64) {
 	formattedTs := eventTimestamp.Format(time.RFC3339)
 	cleanTs := nonNumericRegex.ReplaceAllString(formattedTs[0:17], "")
 	timeWindow, _ := strconv.ParseInt(cleanTs, 10, 64)
+	doTimeWindowTracking(filePath, timeWindow)
 	var rv1 int64 = 0
 	var rv2 int64 = 0
 	//	slog.Warn("timeWindow for timestamp", "timestamp", eventTimestamp, "timeWindow", timeWindow, "error", err)

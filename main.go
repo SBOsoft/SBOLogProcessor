@@ -17,6 +17,7 @@ import (
 
 	"github.com/SBOsoft/SBOLogProcessor/handlers"
 	"github.com/SBOsoft/SBOLogProcessor/logparsers"
+	"github.com/SBOsoft/SBOLogProcessor/metrics"
 )
 
 var globalConfig map[string]ConfigForAMonitoredFile
@@ -63,17 +64,15 @@ func parseCommandArgs() {
 		FilePath:              flag.Arg(0),
 		WriteToFileTargetFile: *writeToFileTargetPtr,
 
-		HandlerInstances: make([]SBOLogHandlerInterface, 1),
+		HandlerInstances: make(map[string]SBOLogHandlerInterface, 1),
 	}
 
 	globalConfig[cfFromCmdLine.FilePath] = cfFromCmdLine
 
-	globalConfig[cfFromCmdLine.FilePath].HandlerInstances[0] = createHandler(cfFromCmdLine.FilePath, cfFromCmdLine.Handlers[0])
-
 	slog.Info("Starting app with configuration", "config", globalConfig)
 }
 
-func createHandler(filePath string, handlerName string) SBOLogHandlerInterface {
+func createHandler(filePath string, handlerName string, dataToSaveChan chan *metrics.SBOMetricWindowDataToBeSaved) SBOLogHandlerInterface {
 
 	switch {
 	case handlerName == handlers.WRITE_TO_FILE_HANDLER_NAME:
@@ -83,6 +82,7 @@ func createHandler(filePath string, handlerName string) SBOLogHandlerInterface {
 		return writeToFile
 	case handlerName == handlers.METRIC_GENERATOR_HANDLER_NAME:
 		metricsGenerator := handlers.NewMetricGeneratorHandler(filePath)
+		metricsGenerator.Begin(dataToSaveChan)
 		slog.Info("Created MetricGeneratorHandler")
 		return metricsGenerator
 	}
@@ -93,9 +93,18 @@ func createHandler(filePath string, handlerName string) SBOLogHandlerInterface {
 func processFile(filePath string, wg *sync.WaitGroup) {
 
 	lines := make(chan string, 10) // Buffered channel to prevent blocking
+	dataToBeSavedChannel := make(chan *metrics.SBOMetricWindowDataToBeSaved, 100)
+	for _, handlerName := range globalConfig[filePath].Handlers {
+		globalConfig[filePath].HandlerInstances[handlerName] = createHandler(filePath, handlerName, dataToBeSavedChannel)
+	}
+
 	wg.Add(1)
-	// Start consumer
-	go consumeLinesFromChannel(filePath, lines, wg)
+	// Start consumer (producer -> consumer -> save data) consumer generates metrics etc
+	go consumeLinesFromChannel(filePath, lines, wg, dataToBeSavedChannel)
+
+	wg.Add(1)
+	// Start goroutine for saving data
+	go processMetricDataToBeSaved(dataToBeSavedChannel, wg)
 
 	// Start producer
 	produceLinesFromFile(filePath, lines)
@@ -113,23 +122,39 @@ func configureLogging() {
 
 }
 
-func consumeLinesFromChannel(filePath string, theChannel chan string, wg *sync.WaitGroup) {
+/*
+Save metric data
+*/
+func processMetricDataToBeSaved(dataToBeSavedChannel chan *metrics.SBOMetricWindowDataToBeSaved, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	for dataToSave := range dataToBeSavedChannel {
+		slog.Debug("processMetricDataToBeSaved save data:", "dataToSave", dataToSave)
+	}
+
+	slog.Debug("processMetricDataToBeSaved done")
+}
+
+func consumeLinesFromChannel(filePath string, linesChannel chan string, wg *sync.WaitGroup, dataToBeSavedChannel chan *metrics.SBOMetricWindowDataToBeSaved) {
 	var processedLineCount, errorCount int
 	var parserFunction func(string) (*logparsers.SBOHttpRequestLog, error) = nil
 	var lineResult bool
 
 	defer wg.Done()
+	defer cleanUpAfterAllLinesAreConsumed(filePath, dataToBeSavedChannel)
 
 	for _, handler := range globalConfig[filePath].Handlers {
 		switch handler {
 		case handlers.WRITE_TO_FILE_HANDLER_NAME:
 
+		case handlers.METRIC_GENERATOR_HANDLER_NAME:
+
 		}
 	}
 
 	slog.Debug("Start consumer in consumeLinesFromChannel", "filePath", filePath)
-	for line := range theChannel {
-		lineResult, parserFunction = processSingleLogLine(filePath, line, parserFunction)
+	for line := range linesChannel {
+		lineResult, parserFunction = processSingleLogLine(filePath, line, parserFunction, dataToBeSavedChannel)
 		if lineResult {
 			processedLineCount++
 		} else {
@@ -144,7 +169,26 @@ func consumeLinesFromChannel(filePath string, theChannel chan string, wg *sync.W
 
 }
 
-func processSingleLogLine(filePath string, logLine string, parserFunction func(string) (*logparsers.SBOHttpRequestLog, error)) (bool, func(string) (*logparsers.SBOHttpRequestLog, error)) {
+/*
+Save remanining metrics before exiting
+*/
+func cleanUpAfterAllLinesAreConsumed(filePath string, dataToBeSavedChannel chan *metrics.SBOMetricWindowDataToBeSaved) {
+	defer close(dataToBeSavedChannel)
+
+	remainingMetrics := metrics.GetAllMetricsForFile(filePath)
+	for metricType, metricData := range remainingMetrics {
+		for keyValue, values := range metricData {
+			for timeWindow, metricValue := range values.Values {
+				theData := metrics.NewSBOMetricWindowDataToBeSaved(filePath, metricType, keyValue, timeWindow, metricValue)
+				dataToBeSavedChannel <- theData
+			}
+		}
+	}
+}
+
+func processSingleLogLine(filePath string, logLine string,
+	parserFunction func(string) (*logparsers.SBOHttpRequestLog, error),
+	dataToBeSavedChannel chan *metrics.SBOMetricWindowDataToBeSaved) (bool, func(string) (*logparsers.SBOHttpRequestLog, error)) {
 	if len(logLine) < 1 {
 		return false, parserFunction
 	}
@@ -180,7 +224,7 @@ func processSingleLogLine(filePath string, logLine string, parserFunction func(s
 		} else {
 			//slog.Debug("Parse success", "parsed", parseResult)
 			//now calculate stats
-			callHandlersForRequestLogEntry(filePath, parseResult)
+			callHandlersForRequestLogEntry(filePath, parseResult, dataToBeSavedChannel)
 			return true, parserFunction
 		}
 
@@ -188,7 +232,7 @@ func processSingleLogLine(filePath string, logLine string, parserFunction func(s
 	return false, parserFunction
 }
 
-func callHandlersForRequestLogEntry(filePath string, parsedLogEntry *logparsers.SBOHttpRequestLog) {
+func callHandlersForRequestLogEntry(filePath string, parsedLogEntry *logparsers.SBOHttpRequestLog, dataToBeSavedChannel chan *metrics.SBOMetricWindowDataToBeSaved) {
 	//processMetricsForRequestLogEntry(filePath, parsedLogEntry)
 	for _, h := range globalConfig[filePath].HandlerInstances {
 		h.HandleEntry(parsedLogEntry)
@@ -419,7 +463,7 @@ type ConfigForAMonitoredFile struct {
 	//used for logs "re-logged" to a different file. parsed log entries will be written as 1 json entry per line into this file
 	//only used by writetofile.go
 	WriteToFileTargetFile string
-	HandlerInstances      []SBOLogHandlerInterface
+	HandlerInstances      map[string]SBOLogHandlerInterface
 }
 
 func LoadConfig(configFilePath string) map[string]ConfigForAMonitoredFile {
@@ -446,7 +490,7 @@ func LoadConfig(configFilePath string) map[string]ConfigForAMonitoredFile {
 // ///////////////handlers
 type SBOLogHandlerInterface interface {
 	Name() string
-	//Begin(configOptions ...any) bool
+	//Begin(someVar any) error
 	HandleEntry(*logparsers.SBOHttpRequestLog) (bool, error)
 	End() bool
 }
