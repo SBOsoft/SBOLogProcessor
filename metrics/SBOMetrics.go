@@ -23,7 +23,7 @@ var timeWindowTrackingMap map[string][]int64 = make(map[string][]int64, SBO_METR
 const SBO_METRIC_REQ_COUNT int = 1
 const SBO_METRIC_BYTES_SENT int = 2
 const SBO_METRIC_HTTP_STATUS int = 3
-const SBO_METRIC_UNIQUE_IP int = 4
+const SBO_METRIC_CLIENT_IP int = 4
 const SBO_METRIC_METHOD int = 5
 const SBO_METRIC_REFERER int = 6
 

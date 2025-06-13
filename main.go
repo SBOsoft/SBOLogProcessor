@@ -134,7 +134,6 @@ func configureLogging() {
 Save metric data
 */
 func processMetricDataToBeSaved(filePath string, dataToBeSavedChannel chan *metrics.SBOMetricWindowDataToBeSaved, wg *sync.WaitGroup) {
-	//TODO don't save unless globalConfig[filePath].WriteMetricsToDb is true
 
 	defer wg.Done()
 	sbodb := db.NewSBOAnalyticsDB()
@@ -143,6 +142,10 @@ func processMetricDataToBeSaved(filePath string, dataToBeSavedChannel chan *metr
 	domainIdsCache := make(map[string]int)
 
 	for dataToSave := range dataToBeSavedChannel {
+		if !globalConfig[filePath].WriteMetricsToDb {
+			//TODO skip this channel and loop and extra calls completely
+			continue
+		}
 		domainName := globalConfig[filePath].DomainName
 		if len(dataToSave.DomainName) > 0 {
 			domainName = dataToSave.DomainName
@@ -153,6 +156,11 @@ func processMetricDataToBeSaved(filePath string, dataToBeSavedChannel chan *metr
 			domainId, _ := sbodb.GetDomainId(domainName)
 			domainIdsCache[domainName] = domainId
 		}
+		/*
+			if domainId < 1 {
+				slog.Warn("domainId < 1 for data", "data", dataToSave)
+			}
+		*/
 		sbodb.SaveMetricData(dataToSave, domainId, globalConfig[filePath].ReplaceExistingMetrics)
 		slog.Debug("processMetricDataToBeSaved save data:", "dataToSave", dataToSave)
 	}

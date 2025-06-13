@@ -60,7 +60,7 @@ func (handler *MetricGeneratorHandler) HandleEntry(parsedLogEntry *logparsers.SB
 	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_BYTES_SENT, "", int64(parsedLogEntry.BytesSent))
 	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_HTTP_STATUS, parsedLogEntry.Status, 1)
 
-	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_UNIQUE_IP, parsedLogEntry.ClientIP, 1)
+	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_CLIENT_IP, parsedLogEntry.ClientIP, 1)
 
 	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_METHOD, parsedLogEntry.Method, 1)
 
@@ -73,7 +73,7 @@ func (handler *MetricGeneratorHandler) HandleEntry(parsedLogEntry *logparsers.SB
 	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_IS_HUMAN, strconv.Itoa(parsedLogEntry.UserAgent.Human), 1)
 
 	if handler.handledEntryCounter%50 == 0 {
-		metrics.CleanUpAllProcessKeyedValueTimeWindowTracking(handler.filePath, metrics.SBO_METRIC_UNIQUE_IP, handler.dataToBeSavedChannel)
+		metrics.CleanUpAllProcessKeyedValueTimeWindowTracking(handler.filePath, metrics.SBO_METRIC_CLIENT_IP, handler.dataToBeSavedChannel)
 	}
 	return true, nil
 }
