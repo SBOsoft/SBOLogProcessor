@@ -15,6 +15,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 
+	"github.com/SBOsoft/SBOLogProcessor/db"
 	"github.com/SBOsoft/SBOLogProcessor/handlers"
 	"github.com/SBOsoft/SBOLogProcessor/logparsers"
 	"github.com/SBOsoft/SBOLogProcessor/metrics"
@@ -52,6 +53,7 @@ func parseCommandArgs() {
 
 	globalConfig = make(map[string]ConfigForAMonitoredFile)
 
+	//TODO fix this, creating config here is temporary/dev only. config file should be passed as an arg
 	var cfFromCmdLine = ConfigForAMonitoredFile{
 		Follow:                *followPtr,
 		StartFrom:             *startFromPtr,
@@ -65,7 +67,13 @@ func parseCommandArgs() {
 		WriteToFileTargetFile: *writeToFileTargetPtr,
 
 		HandlerInstances: make(map[string]SBOLogHandlerInterface, 1),
-	}
+
+		WriteMetricsToDb:       true,
+		DbAddress:              "127.0.0.1:23306",
+		DbUser:                 "root",
+		DbPassword:             "sboanalyticsrootpw",
+		DbDatabase:             "sboanalytics",
+		ReplaceExistingMetrics: true}
 
 	globalConfig[cfFromCmdLine.FilePath] = cfFromCmdLine
 
@@ -104,7 +112,7 @@ func processFile(filePath string, wg *sync.WaitGroup) {
 
 	wg.Add(1)
 	// Start goroutine for saving data
-	go processMetricDataToBeSaved(dataToBeSavedChannel, wg)
+	go processMetricDataToBeSaved(filePath, dataToBeSavedChannel, wg)
 
 	// Start producer
 	produceLinesFromFile(filePath, lines)
@@ -125,10 +133,27 @@ func configureLogging() {
 /*
 Save metric data
 */
-func processMetricDataToBeSaved(dataToBeSavedChannel chan *metrics.SBOMetricWindowDataToBeSaved, wg *sync.WaitGroup) {
+func processMetricDataToBeSaved(filePath string, dataToBeSavedChannel chan *metrics.SBOMetricWindowDataToBeSaved, wg *sync.WaitGroup) {
+	//TODO don't save unless globalConfig[filePath].WriteMetricsToDb is true
+
 	defer wg.Done()
+	sbodb := db.NewSBOAnalyticsDB()
+	defer sbodb.Close()
+	sbodb.Init(globalConfig[filePath].DbUser, globalConfig[filePath].DbPassword, globalConfig[filePath].DbAddress, globalConfig[filePath].DbDatabase)
+	domainIdsCache := make(map[string]int)
 
 	for dataToSave := range dataToBeSavedChannel {
+		domainName := globalConfig[filePath].DomainName
+		if len(dataToSave.DomainName) > 0 {
+			domainName = dataToSave.DomainName
+		}
+		domainId := domainIdsCache[domainName]
+		if domainId < 1 {
+			//TODO don't ignore the error?
+			domainId, _ := sbodb.GetDomainId(domainName)
+			domainIdsCache[domainName] = domainId
+		}
+		sbodb.SaveMetricData(dataToSave, domainId, globalConfig[filePath].ReplaceExistingMetrics)
 		slog.Debug("processMetricDataToBeSaved save data:", "dataToSave", dataToSave)
 	}
 
@@ -462,8 +487,14 @@ type ConfigForAMonitoredFile struct {
 	TimeWindowSizeMinutes int
 	//used for logs "re-logged" to a different file. parsed log entries will be written as 1 json entry per line into this file
 	//only used by writetofile.go
-	WriteToFileTargetFile string
-	HandlerInstances      map[string]SBOLogHandlerInterface
+	WriteToFileTargetFile  string
+	HandlerInstances       map[string]SBOLogHandlerInterface
+	WriteMetricsToDb       bool
+	DbAddress              string
+	DbUser                 string
+	DbPassword             string
+	DbDatabase             string
+	ReplaceExistingMetrics bool
 }
 
 func LoadConfig(configFilePath string) map[string]ConfigForAMonitoredFile {
