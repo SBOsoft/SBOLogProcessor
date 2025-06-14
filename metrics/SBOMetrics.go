@@ -113,11 +113,7 @@ func ProcessKeyedValueTimeWindowTracking(filePath string, keyValue string, metri
 		tw64 := int64(tw)
 		if allMetrics[filePath][metricType][keyValue].Values[tw64] > 0 {
 			found = true
-		} else {
-			//remove timewindow entries and save if necessary
-			dataToBeSavedChannel <- NewSBOMetricWindowDataToBeSaved(filePath, metricType, keyValue, tw64, allMetrics[filePath][metricType][keyValue].Values[tw64])
-			delete(allMetrics[filePath][metricType][keyValue].Values, tw64)
-			slog.Debug("Remove expired entry in processKeyedValueTimeWindowTracking", "keyValue", keyValue, "metricType", metricType, "timeWindow", tw64)
+			break
 		}
 	}
 
