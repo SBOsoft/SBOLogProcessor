@@ -20,14 +20,16 @@ type MetricGeneratorHandler struct {
 	lastNPosition        int
 	handledEntryCounter  int
 	dataToBeSavedChannel chan *metrics.SBOMetricWindowDataToBeSaved
+	metricsManager       *metrics.SBOMetricsManager
 }
 
-func NewMetricGeneratorHandler(filePath string) *MetricGeneratorHandler {
+func NewMetricGeneratorHandler(filePath string, metricsManager *metrics.SBOMetricsManager) *MetricGeneratorHandler {
 	lastN := make([]*logparsers.SBOHttpRequestLog, METRIC_GENERATOR_LAST_N_WINDOW_SIZE)
 	var rv = MetricGeneratorHandler{
-		filePath:      filePath,
-		lastNEntries:  lastN,
-		lastNPosition: 0}
+		filePath:       filePath,
+		lastNEntries:   lastN,
+		lastNPosition:  0,
+		metricsManager: metricsManager}
 
 	return &rv
 }
@@ -47,8 +49,8 @@ func (handler *MetricGeneratorHandler) addToLastN(parsedLogEntry *logparsers.SBO
 	handler.lastNPosition++
 }
 
-func PrintMetrics(filePath string) {
-	jsonBytes, _ := json.MarshalIndent(metrics.GetAllMetricsForFile(filePath), "", "    ")
+func (handler *MetricGeneratorHandler) PrintMetrics(filePath string) {
+	jsonBytes, _ := json.MarshalIndent(handler.metricsManager.GetAllMetricsForFile(filePath), "", "    ")
 	str := string(jsonBytes)
 	fmt.Print(str)
 }
@@ -73,13 +75,13 @@ func (handler *MetricGeneratorHandler) HandleEntry(parsedLogEntry *logparsers.SB
 	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_IS_HUMAN, strconv.Itoa(parsedLogEntry.UserAgent.Human), 1)
 
 	if handler.handledEntryCounter%50 == 0 {
-		metrics.CleanUpAllProcessKeyedValueTimeWindowTracking(handler.filePath, metrics.SBO_METRIC_CLIENT_IP, handler.dataToBeSavedChannel)
+		handler.metricsManager.CleanUpAllProcessKeyedValueTimeWindowTracking(handler.filePath, metrics.SBO_METRIC_CLIENT_IP, handler.dataToBeSavedChannel)
 	}
 	return true, nil
 }
 
 func (handler *MetricGeneratorHandler) handleSingleMetric(parsedLogEntry *logparsers.SBOHttpRequestLog, metricType int, keyValue string, valueToAdd int64) {
-	dataToBeSaved := metrics.AddMetric(handler.filePath, metricType, keyValue, parsedLogEntry.Timestamp, valueToAdd)
+	dataToBeSaved := handler.metricsManager.AddMetric(handler.filePath, metricType, keyValue, parsedLogEntry.Timestamp, valueToAdd)
 	if dataToBeSaved != nil {
 		fmt.Printf("Data to save: %v", dataToBeSaved)
 		handler.dataToBeSavedChannel <- dataToBeSaved
@@ -87,6 +89,15 @@ func (handler *MetricGeneratorHandler) handleSingleMetric(parsedLogEntry *logpar
 }
 
 func (handler *MetricGeneratorHandler) End() bool {
-	PrintMetrics(handler.filePath)
+	remainingMetrics := handler.metricsManager.GetAllMetricsForFile(handler.filePath)
+	for metricType, metricData := range remainingMetrics {
+		for keyValue, values := range metricData {
+			for timeWindow, metricValue := range values.Values {
+				theData := metrics.NewSBOMetricWindowDataToBeSaved(handler.filePath, metricType, keyValue, timeWindow, metricValue)
+				handler.dataToBeSavedChannel <- theData
+			}
+		}
+	}
+	handler.PrintMetrics(handler.filePath)
 	return true
 }

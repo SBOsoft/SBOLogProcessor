@@ -17,8 +17,10 @@ var nonNumericRegex = regexp.MustCompile(`[^0-9]+`)
 
 type SBOMetricMap map[int]map[string]*SBOMetric
 
-var allMetrics map[string]SBOMetricMap = make(map[string]SBOMetricMap)
-var timeWindowTrackingMap map[string][]int64 = make(map[string][]int64, SBO_METRIC_VALUES_WINDOW_SIZE+1)
+type SBOMetricsManager struct {
+	allMetrics            map[string]SBOMetricMap
+	timeWindowTrackingMap map[string][]int64
+}
 
 const SBO_METRIC_REQ_COUNT int = 1
 const SBO_METRIC_BYTES_SENT int = 2
@@ -37,6 +39,7 @@ type SBOMetric struct {
 	keys       []int64 `json:"-"`
 	Values     map[int64]int64
 	keyCounter int
+	manager    *SBOMetricsManager `json:"-"`
 }
 
 type SBOMetricWindowDataToBeSaved struct {
@@ -57,25 +60,37 @@ func NewSBOMetricWindowDataToBeSaved(filePath string, metricType int, keyValue s
 	return &rv
 }
 
-func GetAllMetrics() map[string]SBOMetricMap {
-	return allMetrics
+func NewSBOMetricsManager() *SBOMetricsManager {
+
+	m := make(map[string]SBOMetricMap)
+	t := make(map[string][]int64, SBO_METRIC_VALUES_WINDOW_SIZE+1)
+
+	manager := SBOMetricsManager{
+		allMetrics:            m,
+		timeWindowTrackingMap: t}
+
+	return &manager
 }
 
-func GetAllMetricsForFile(filePath string) SBOMetricMap {
-	return allMetrics[filePath]
+func (manager *SBOMetricsManager) GetAllMetrics() map[string]SBOMetricMap {
+	return manager.allMetrics
 }
 
-func NewSBOMetric(metricType int, key string) *SBOMetric {
+func (manager *SBOMetricsManager) GetAllMetricsForFile(filePath string) SBOMetricMap {
+	return manager.allMetrics[filePath]
+}
+
+func NewSBOMetric(metricType int, key string, manager *SBOMetricsManager) *SBOMetric {
 	keys := make([]int64, SBO_METRIC_VALUES_WINDOW_SIZE)
 	values := make(map[int64]int64, SBO_METRIC_VALUES_WINDOW_SIZE)
-	return &SBOMetric{ /* metricType, key, */ keys, values, 0}
+	return &SBOMetric{ /* metricType, key, */ keys, values, 0, manager}
 }
 
-func AddMetric(filePath string, metricType int, keyValue string, eventTimestamp time.Time, valueToAdd int64) *SBOMetricWindowDataToBeSaved {
-	mapForFile, ok := allMetrics[filePath]
+func (manager *SBOMetricsManager) AddMetric(filePath string, metricType int, keyValue string, eventTimestamp time.Time, valueToAdd int64) *SBOMetricWindowDataToBeSaved {
+	mapForFile, ok := manager.allMetrics[filePath]
 	if !ok {
 		mapForFile = make(map[int]map[string]*SBOMetric)
-		allMetrics[filePath] = mapForFile
+		manager.allMetrics[filePath] = mapForFile
 	}
 	keyMap, ok := mapForFile[metricType]
 	if !ok {
@@ -85,7 +100,7 @@ func AddMetric(filePath string, metricType int, keyValue string, eventTimestamp 
 	sbom, ok := keyMap[keyValue]
 
 	if !ok {
-		sbom = NewSBOMetric(metricType, keyValue)
+		sbom = NewSBOMetric(metricType, keyValue, manager)
 		keyMap[keyValue] = sbom
 	}
 	timeWindow, metricValue := sbom.addValue(filePath, eventTimestamp, valueToAdd)
@@ -101,17 +116,17 @@ func (sbm *SBOMetric) IncrementKeyCounter() {
 	sbm.keyCounter++
 }
 
-func CleanUpAllProcessKeyedValueTimeWindowTracking(filePath string, metricType int, dataToBeSavedChannel chan *SBOMetricWindowDataToBeSaved) {
-	for k, _ := range allMetrics[filePath][metricType] {
-		ProcessKeyedValueTimeWindowTracking(filePath, k, metricType, dataToBeSavedChannel)
+func (manager *SBOMetricsManager) CleanUpAllProcessKeyedValueTimeWindowTracking(filePath string, metricType int, dataToBeSavedChannel chan *SBOMetricWindowDataToBeSaved) {
+	for k, _ := range manager.allMetrics[filePath][metricType] {
+		manager.ProcessKeyedValueTimeWindowTracking(filePath, k, metricType, dataToBeSavedChannel)
 	}
 }
 
-func ProcessKeyedValueTimeWindowTracking(filePath string, keyValue string, metricType int, dataToBeSavedChannel chan *SBOMetricWindowDataToBeSaved) {
+func (manager *SBOMetricsManager) ProcessKeyedValueTimeWindowTracking(filePath string, keyValue string, metricType int, dataToBeSavedChannel chan *SBOMetricWindowDataToBeSaved) {
 	found := false
-	for _, tw := range timeWindowTrackingMap[filePath] {
+	for _, tw := range manager.timeWindowTrackingMap[filePath] {
 		tw64 := int64(tw)
-		if allMetrics[filePath][metricType][keyValue].Values[tw64] > 0 {
+		if manager.allMetrics[filePath][metricType][keyValue].Values[tw64] > 0 {
 			found = true
 			break
 		}
@@ -121,28 +136,28 @@ func ProcessKeyedValueTimeWindowTracking(filePath string, keyValue string, metri
 	//so move it out of scope
 	if !found {
 		//remove the keyed value
-		delete(allMetrics[filePath][metricType], keyValue)
+		delete(manager.allMetrics[filePath][metricType], keyValue)
 		slog.Debug("Remove key value with no children in processKeyedValueTimeWindowTracking", "keyValue", keyValue, "metricType", metricType)
 	}
 }
 
-func doTimeWindowTracking(filePath string, timeWindow int64) {
-	if timeWindowTrackingMap[filePath] == nil {
-		timeWindowTrackingMap[filePath] = make([]int64, SBO_METRIC_VALUES_WINDOW_SIZE+1)
+func (manager *SBOMetricsManager) doTimeWindowTracking(filePath string, timeWindow int64) {
+	if manager.timeWindowTrackingMap[filePath] == nil {
+		manager.timeWindowTrackingMap[filePath] = make([]int64, SBO_METRIC_VALUES_WINDOW_SIZE+1)
 	}
 
-	if slices.Contains(timeWindowTrackingMap[filePath], timeWindow) {
+	if slices.Contains(manager.timeWindowTrackingMap[filePath], timeWindow) {
 		//nothing to do, it's already in
 		return
 	}
-	timeWindowTrackingMap[filePath] = append(timeWindowTrackingMap[filePath], timeWindow)
-	if len(timeWindowTrackingMap[filePath]) >= SBO_METRIC_VALUES_WINDOW_SIZE {
-		slices.Sort(timeWindowTrackingMap[filePath])
+	manager.timeWindowTrackingMap[filePath] = append(manager.timeWindowTrackingMap[filePath], timeWindow)
+	if len(manager.timeWindowTrackingMap[filePath]) >= SBO_METRIC_VALUES_WINDOW_SIZE {
+		slices.Sort(manager.timeWindowTrackingMap[filePath])
 
 		//oldestTimewindow := timeWindowTrackingMap[filePath][0]
-		timeWindowTrackingMap[filePath] = timeWindowTrackingMap[filePath][1:]
+		manager.timeWindowTrackingMap[filePath] = manager.timeWindowTrackingMap[filePath][1:]
 	}
-	slog.Debug("doTimeWindowTracking", "timeWindowTrackingMap[filePath]", timeWindowTrackingMap[filePath])
+	slog.Debug("doTimeWindowTracking", "timeWindowTrackingMap[filePath]", manager.timeWindowTrackingMap[filePath])
 
 }
 
@@ -154,7 +169,7 @@ func (sbm *SBOMetric) addValue(filePath string, eventTimestamp time.Time, valueT
 	formattedTs := eventTimestamp.Format(time.RFC3339)
 	cleanTs := nonNumericRegex.ReplaceAllString(formattedTs[0:17], "")
 	timeWindow, _ := strconv.ParseInt(cleanTs, 10, 64)
-	doTimeWindowTracking(filePath, timeWindow)
+	sbm.manager.doTimeWindowTracking(filePath, timeWindow)
 	var rv1 int64 = 0
 	var rv2 int64 = 0
 	//	slog.Warn("timeWindow for timestamp", "timestamp", eventTimestamp, "timeWindow", timeWindow, "error", err)

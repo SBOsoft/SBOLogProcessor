@@ -80,7 +80,7 @@ func parseCommandArgs() {
 	slog.Info("Starting app with configuration", "config", globalConfig)
 }
 
-func createHandler(filePath string, handlerName string, dataToSaveChan chan *metrics.SBOMetricWindowDataToBeSaved) SBOLogHandlerInterface {
+func createHandler(filePath string, handlerName string, dataToSaveChan chan *metrics.SBOMetricWindowDataToBeSaved, metricsManager *metrics.SBOMetricsManager) SBOLogHandlerInterface {
 
 	switch {
 	case handlerName == handlers.WRITE_TO_FILE_HANDLER_NAME:
@@ -89,7 +89,7 @@ func createHandler(filePath string, handlerName string, dataToSaveChan chan *met
 		slog.Info("Created WriteToFileHandler", "error", err)
 		return writeToFile
 	case handlerName == handlers.METRIC_GENERATOR_HANDLER_NAME:
-		metricsGenerator := handlers.NewMetricGeneratorHandler(filePath)
+		metricsGenerator := handlers.NewMetricGeneratorHandler(filePath, metricsManager)
 		metricsGenerator.Begin(dataToSaveChan)
 		slog.Info("Created MetricGeneratorHandler")
 		return metricsGenerator
@@ -102,9 +102,6 @@ func processFile(filePath string, wg *sync.WaitGroup) {
 
 	lines := make(chan string, 10) // Buffered channel to prevent blocking
 	dataToBeSavedChannel := make(chan *metrics.SBOMetricWindowDataToBeSaved, 100)
-	for _, handlerName := range globalConfig[filePath].Handlers {
-		globalConfig[filePath].HandlerInstances[handlerName] = createHandler(filePath, handlerName, dataToBeSavedChannel)
-	}
 
 	wg.Add(1)
 	// Start consumer (producer -> consumer -> save data) consumer generates metrics etc
@@ -173,8 +170,14 @@ func consumeLinesFromChannel(filePath string, linesChannel chan string, wg *sync
 	var parserFunction func(string) (*logparsers.SBOHttpRequestLog, error) = nil
 	var lineResult bool
 
+	//*metrics.SBOMetricsManager
+	metricsManager := metrics.NewSBOMetricsManager()
+
+	for _, handlerName := range globalConfig[filePath].Handlers {
+		globalConfig[filePath].HandlerInstances[handlerName] = createHandler(filePath, handlerName, dataToBeSavedChannel, metricsManager)
+	}
+
 	defer wg.Done()
-	defer cleanUpAfterAllLinesAreConsumed(filePath, dataToBeSavedChannel)
 
 	for _, handler := range globalConfig[filePath].Handlers {
 		switch handler {
@@ -198,25 +201,9 @@ func consumeLinesFromChannel(filePath string, linesChannel chan string, wg *sync
 	for _, h := range globalConfig[filePath].HandlerInstances {
 		h.End()
 	}
+	defer close(dataToBeSavedChannel)
 	slog.Info("consumeLinesFromChannel finished", "processedLineCount", processedLineCount, "errorCount", errorCount)
 
-}
-
-/*
-Save remanining metrics before exiting
-*/
-func cleanUpAfterAllLinesAreConsumed(filePath string, dataToBeSavedChannel chan *metrics.SBOMetricWindowDataToBeSaved) {
-	defer close(dataToBeSavedChannel)
-
-	remainingMetrics := metrics.GetAllMetricsForFile(filePath)
-	for metricType, metricData := range remainingMetrics {
-		for keyValue, values := range metricData {
-			for timeWindow, metricValue := range values.Values {
-				theData := metrics.NewSBOMetricWindowDataToBeSaved(filePath, metricType, keyValue, timeWindow, metricValue)
-				dataToBeSavedChannel <- theData
-			}
-		}
-	}
 }
 
 func processSingleLogLine(filePath string, logLine string,
