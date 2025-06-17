@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"log/slog"
@@ -21,12 +22,20 @@ import (
 	"github.com/SBOsoft/SBOLogProcessor/metrics"
 )
 
-var globalConfig map[string]ConfigForAMonitoredFile
+const (
+	SBO_GLOBAL_PROFILE_METRICS  string = "metrics"
+	SBO_GLOBAL_PROFILE_COUNT    string = "count"
+	SBO_GLOBAL_PROFILE_SECURITY string = "security"
+)
+
+var globalConfig map[string]ConfigForAMonitoredFile = make(map[string]ConfigForAMonitoredFile)
+var globalActiveProfile string = SBO_GLOBAL_PROFILE_METRICS
 
 func main() {
 	if len(os.Args) < 2 {
 		log.Fatal("Please provide a file path as argument")
 	}
+
 	configureLogging()
 	parseCommandArgs()
 
@@ -42,6 +51,9 @@ func main() {
 }
 
 func parseCommandArgs() {
+	profilePtr := flag.String("p", "metrics", "Active profile. Defaults to metrics which will create metrics. Available options are: metrics, count, security. Where count will output total stats from the given file and security will output malicious IPs and security stats.")
+	confFilePtr := flag.String("c", "", "Configuration file in json format. There is no default value but you will want to pass a config file when -m=metrics. ")
+
 	followPtr := flag.Bool("f", false, "Follow changes to the file, as in tail -f")
 	windowSizePtr := flag.Int("w", 1, "Statistics window size in minutes, e.g to report request statistics for every 5 minute window. Defaults to 300, 5 minute")
 	startFromPtr := flag.Int("s", START_FROM_BEGINNING, "When 0, file will be processed starting from the beginning. When -1, file will be processed starting from the end (i.e only lines appended after the program starts will be processed). Defaults to 0")
@@ -51,33 +63,99 @@ func parseCommandArgs() {
 
 	flag.Parse()
 
-	globalConfig = make(map[string]ConfigForAMonitoredFile)
+	globalActiveProfile = *profilePtr
+	if globalActiveProfile != SBO_GLOBAL_PROFILE_COUNT &&
+		globalActiveProfile != SBO_GLOBAL_PROFILE_METRICS &&
+		globalActiveProfile != SBO_GLOBAL_PROFILE_SECURITY {
+		panic(fmt.Sprintf("Invalid operating mode value: '%s' ", globalActiveProfile))
+	}
 
-	//TODO fix this, creating config here is temporary/dev only. config file should be passed as an arg
-	var cfFromCmdLine = ConfigForAMonitoredFile{
-		Follow:                *followPtr,
-		StartFrom:             *startFromPtr,
-		TimeWindowSizeMinutes: *windowSizePtr,
+	configFileName := *confFilePtr
+	loadedConfigFromFile := false
 
-		DomainName: *domainPtr,
+	if len(configFileName) > 0 {
+		loadedConfigFromFile = loadConfigFromFile(configFileName)
+	}
 
-		Handlers: []string{*handlerPtr},
+	if !loadedConfigFromFile {
+		if len(flag.Arg(0)) > 0 {
+			//TODO fix this, creating config here is temporary/dev only. config file should be passed as an arg
+			var cfFromCmdLine = ConfigForAMonitoredFile{
+				Follow:                *followPtr,
+				StartFrom:             *startFromPtr,
+				TimeWindowSizeMinutes: *windowSizePtr,
 
-		FilePath:              flag.Arg(0),
-		WriteToFileTargetFile: *writeToFileTargetPtr,
+				DomainName: *domainPtr,
 
-		HandlerInstances: make(map[string]SBOLogHandlerInterface, 1),
+				Handlers: []string{*handlerPtr},
 
-		WriteMetricsToDb:       true,
-		DbAddress:              "127.0.0.1:23306",
-		DbUser:                 "root",
-		DbPassword:             "sboanalyticsrootpw",
-		DbDatabase:             "sboanalytics",
-		ReplaceExistingMetrics: true}
+				FilePath:              flag.Arg(0),
+				WriteToFileTargetFile: *writeToFileTargetPtr,
 
-	globalConfig[cfFromCmdLine.FilePath] = cfFromCmdLine
+				HandlerInstances: make(map[string]SBOLogHandlerInterface, 1),
+
+				WriteMetricsToDb:       false,
+				DbAddress:              "127.0.0.1:23306",
+				DbUser:                 "root",
+				DbPassword:             "sboanalyticsrootpw",
+				DbDatabase:             "sboanalytics",
+				ReplaceExistingMetrics: true}
+
+			globalConfig[cfFromCmdLine.FilePath] = cfFromCmdLine
+		} else {
+			log.Fatalf("Invalid options, cannot continue. Either a configuration file or command line parameters are required")
+		}
+
+	}
 
 	slog.Info("Starting app with configuration", "config", globalConfig)
+}
+
+func loadConfigFromFile(configFileName string) bool {
+	loadedConfigFromFile := false
+	var configLoadedFromFile map[string]ConfigForAMonitoredFile = make(map[string]ConfigForAMonitoredFile)
+	fileInfo, err := os.Stat(configFileName)
+	if os.IsNotExist(err) {
+		//no config file provided
+		slog.Error("Configuration file path parameter, -c, points to non-existent file. It must point to a json file. Ignoring parameter", "file", configFileName)
+	} else {
+		if fileInfo.IsDir() {
+			slog.Error("Configuration file path parameter, -c, points to a directory. It must point to a json file. Ignoring parameter")
+		} else {
+			configFileBytes, err := os.ReadFile(configFileName)
+			if err != nil {
+				slog.Error("Failed to read configuration file", "file", configFileName, "error", err)
+			} else {
+				err := json.Unmarshal(configFileBytes, &configLoadedFromFile)
+				if err != nil {
+					slog.Error("Failed to load configuration from file", "file", configFileName, "error", err)
+				} else {
+					loadedConfigFromFile = true
+					for fp, conf := range configLoadedFromFile {
+						globalConfig[fp] = ConfigForAMonitoredFile{
+							Enabled:                conf.Enabled,
+							FilePath:               conf.FilePath,
+							Handlers:               conf.Handlers,
+							StartFrom:              conf.StartFrom,
+							SkipIfLineMatchesRegex: conf.SkipIfLineMatchesRegex,
+							Follow:                 conf.Follow,
+							DomainName:             conf.DomainName,
+							TimeWindowSizeMinutes:  conf.TimeWindowSizeMinutes,
+							WriteToFileTargetFile:  conf.WriteToFileTargetFile,
+							HandlerInstances:       make(map[string]SBOLogHandlerInterface),
+							WriteMetricsToDb:       conf.WriteMetricsToDb,
+							DbAddress:              conf.DbAddress,
+							DbUser:                 conf.DbUser,
+							DbPassword:             conf.DbPassword,
+							DbDatabase:             conf.DbDatabase,
+							ReplaceExistingMetrics: conf.ReplaceExistingMetrics}
+					}
+					slog.Info("Loaded config from file", "file", configFileName, "configuration", globalConfig)
+				}
+			}
+		}
+	}
+	return loadedConfigFromFile
 }
 
 func createHandler(filePath string, handlerName string, dataToSaveChan chan *metrics.SBOMetricWindowDataToBeSaved, metricsManager *metrics.SBOMetricsManager) SBOLogHandlerInterface {
@@ -93,6 +171,11 @@ func createHandler(filePath string, handlerName string, dataToSaveChan chan *met
 		metricsGenerator.Begin(dataToSaveChan)
 		slog.Info("Created MetricGeneratorHandler")
 		return metricsGenerator
+	case handlerName == handlers.COUNTER_HANDLER_NAME:
+		counterHandler := handlers.NewCounterHandler(filePath)
+		counterHandler.Begin(dataToSaveChan, globalConfig[filePath].Follow)
+		slog.Info("Created CounterHandler")
+		return counterHandler
 	}
 	slog.Warn("createHandler failed no handler for handler name", "handlerName", handlerName)
 	return nil
@@ -490,27 +573,6 @@ type ConfigForAMonitoredFile struct {
 	DbPassword             string
 	DbDatabase             string
 	ReplaceExistingMetrics bool
-}
-
-func LoadConfig(configFilePath string) map[string]ConfigForAMonitoredFile {
-	var configData []byte
-	var err error
-
-	configData, err = os.ReadFile(configFilePath)
-
-	if err != nil {
-		slog.Error("Failed to file config file", "configFilePath", configFilePath, "error", err)
-		return nil
-	}
-	var loadedConfig map[string]ConfigForAMonitoredFile
-	err = json.Unmarshal(configData, &loadedConfig)
-
-	if err != nil {
-		slog.Error("Failed to parse config loaded from file", "configFilePath", configFilePath, "error", err)
-		return nil
-	}
-
-	return loadedConfig
 }
 
 // ///////////////handlers
