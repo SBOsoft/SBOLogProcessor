@@ -47,49 +47,55 @@ const (
 	UA_NAME_CHROME  string = "Chrome"
 	UA_NAME_FIREFOX string = "Firefox"
 
-	UAFamily_Other     int = 0
-	UAFamily_Chrome    int = 10
-	UAFamily_Firefox   int = 20
-	UAFamily_Safari    int = 30
-	UAFamily_Edge      int = 40
-	UAFamily_SearchBot int = 100
-	UAFamily_AIBot     int = 200
-	UAFamily_Script    int = 300
-	UAFamily_OtherBot  int = 400
+	UAFamily_Other     string = "Other"
+	UAFamily_Chrome    string = "Chrome"
+	UAFamily_Firefox   string = "Firefox"
+	UAFamily_Safari    string = "Safari"
+	UAFamily_Edge      string = "Edge"
+	UAFamily_SearchBot string = "SearchBot"
+	UAFamily_AIBot     string = "AIBot"
+	UAFamily_Script    string = "Script"
+	UAFamily_OtherBot  string = "OtherBot"
 
-	OSFamily_Other   int = 0
-	OSFamily_Windows int = 10
-	OSFamily_MacOS   int = 20
-	OSFamily_Linux   int = 30
-	OSFamily_Android int = 40
-	OSFamily_IOS     int = 50
+	OSFamily_Other   string = "Other"
+	OSFamily_Windows string = "Windows"
+	OSFamily_MacOS   string = "MacOS"
+	OSFamily_Linux   string = "Linux"
+	OSFamily_Android string = "Android"
+	OSFamily_IOS     string = "IOS"
 
-	DeviceType_Unknown int = 0
-	DeviceType_Desktop int = 10
-	DeviceType_Mobile  int = 20
-	DeviceType_Script  int = 30
+	DeviceType_Unknown string = "Unknown"
+	DeviceType_Desktop string = "Desktop"
+	DeviceType_Mobile  string = "Mobile"
+	DeviceType_Script  string = "Script"
 
-	Human_Yes     int = 1
-	Human_No      int = 2
-	Human_Unknown int = 0
+	Human_Yes     string = "Human"
+	Human_No      string = "Not Human"
+	Human_Unknown string = "Unknown"
 
-	RequestIntent_Unknown   int = 0
-	RequestIntent_Scraping  int = 2
-	RequestIntent_Malicious int = 3
+	RequestIntent_Unknown   string = "Unknown"
+	RequestIntent_Scraping  string = "Scraping"
+	RequestIntent_Malicious string = "Malicious"
 )
 
 type SBOUserAgent struct {
 	FullName   string
-	OS         int
-	Family     int
-	DeviceType int
-	Human      int
-	Intent     int
+	OS         string
+	Family     string
+	DeviceType string
+	Human      string
+	Intent     string
 }
 
 func NewSBOUserAgent(uaString string) *SBOUserAgent {
-	ua := SBOUserAgent{}
-	ua.FullName = uaString
+	ua := SBOUserAgent{
+		FullName:   uaString,
+		OS:         OSFamily_Other,
+		Family:     UAFamily_Other,
+		DeviceType: DeviceType_Unknown,
+		Human:      Human_Unknown,
+		Intent:     RequestIntent_Unknown}
+
 	before, after, found := strings.Cut(uaString, " ")
 
 	if !found {

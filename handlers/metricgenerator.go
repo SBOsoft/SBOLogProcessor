@@ -3,7 +3,6 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
-	"strconv"
 
 	"github.com/SBOsoft/SBOLogProcessor/logparsers"
 	"github.com/SBOsoft/SBOLogProcessor/metrics"
@@ -69,10 +68,10 @@ func (handler *MetricGeneratorHandler) HandleEntry(parsedLogEntry *logparsers.SB
 	if len(parsedLogEntry.Referer) > 0 {
 		handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_REFERER, parsedLogEntry.Referer, 1)
 	}
-	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_UA_FAMILY, strconv.Itoa(parsedLogEntry.UserAgent.Family), 1)
-	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_OS_FAMILY, strconv.Itoa(parsedLogEntry.UserAgent.OS), 1)
-	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_DEVICE_TYPE, strconv.Itoa(parsedLogEntry.UserAgent.DeviceType), 1)
-	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_IS_HUMAN, strconv.Itoa(parsedLogEntry.UserAgent.Human), 1)
+	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_UA_FAMILY, parsedLogEntry.UserAgent.Family, 1)
+	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_OS_FAMILY, parsedLogEntry.UserAgent.OS, 1)
+	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_DEVICE_TYPE, parsedLogEntry.UserAgent.DeviceType, 1)
+	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_IS_HUMAN, parsedLogEntry.UserAgent.Human, 1)
 
 	if handler.handledEntryCounter%50 == 0 {
 		handler.metricsManager.CleanUpAllProcessKeyedValueTimeWindowTracking(handler.filePath, metrics.SBO_METRIC_CLIENT_IP, handler.dataToBeSavedChannel)

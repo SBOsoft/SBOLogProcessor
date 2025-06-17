@@ -36,9 +36,9 @@ type CounterHandler struct {
 	StatusCodes           map[string]*CounterValue
 	Methods               map[string]*CounterValue
 	Clients               map[string]*CounterValue
-	UserAgentFamilies     map[int]*CounterValue
-	UserAgentOSFamilies   map[int]*CounterValue
-	DeviceTypes           map[int]*CounterValue
+	UserAgentFamilies     map[string]*CounterValue
+	UserAgentOSFamilies   map[string]*CounterValue
+	DeviceTypes           map[string]*CounterValue
 	RequestsFromNonHumans *CounterValue
 	RequestsFromHumans    *CounterValue
 	dataToBeSavedChannel  chan *metrics.SBOMetricWindowDataToBeSaved
@@ -53,9 +53,9 @@ func NewCounterHandler(filePath string) *CounterHandler {
 		Clients:             make(map[string]*CounterValue),
 		Methods:             make(map[string]*CounterValue),
 		StatusCodes:         make(map[string]*CounterValue),
-		UserAgentFamilies:   make(map[int]*CounterValue),
-		UserAgentOSFamilies: make(map[int]*CounterValue),
-		DeviceTypes:         make(map[int]*CounterValue)}
+		UserAgentFamilies:   make(map[string]*CounterValue),
+		UserAgentOSFamilies: make(map[string]*CounterValue),
+		DeviceTypes:         make(map[string]*CounterValue)}
 
 	return &rv
 }
@@ -183,8 +183,8 @@ func (handler *CounterHandler) PrintCounterData(fromTicker bool) {
 	handler.printMapValue("Status codes      :", handler.StatusCodes)
 
 	handler.printMapValue("Methods           :", handler.Methods)
-	//handler.printMapValue("User agents       :", handler.UserAgentFamilies)
-	//handler.printMapValue("Operating systems :", handler.UserAgentOSFamilies)
+	handler.printMapValue("User agents       :", handler.UserAgentFamilies)
+	handler.printMapValue("Operating systems :", handler.UserAgentOSFamilies)
 	fmt.Println()
 	fmt.Println("-----------------------------")
 
@@ -198,7 +198,7 @@ func (handler *CounterHandler) printMapValue(header string, m map[string]*Counte
 	indent := strings.Repeat(" ", len(header))
 	linePrefix := header
 	for k, v := range m {
-		fmt.Printf("%s %-5v:%5v (%v)", linePrefix, k, v.CurrentValue, v.CurrentValue-v.PreviousValue)
+		fmt.Printf("%s %-8v:%6v (%v)", linePrefix, k, v.CurrentValue, v.CurrentValue-v.PreviousValue)
 		fmt.Println()
 		if i == 0 {
 			linePrefix = indent
