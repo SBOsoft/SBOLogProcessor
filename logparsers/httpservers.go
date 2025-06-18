@@ -31,7 +31,6 @@ type SBOHttpRequestLog struct {
 	Status        string
 	BytesSent     int
 	Referer       string
-	RefererDomain string
 	UserAgent     *SBOUserAgent
 	Malicious     int
 	//log timestamp is before the timestamps in previous lines. e.g we see logs from 18:01:33 then a log with timestamp 18:00:55 comes
@@ -43,9 +42,13 @@ func (sbol *SBOHttpRequestLog) SBOHttpRequestLogSetUserAgent(userAgent string) {
 	sbol.UserAgent = NewSBOUserAgent(userAgent)
 }
 
-func (sbol *SBOHttpRequestLog) SBOHttpRequestLogSetReferer(referer string) {
+func (sbol *SBOHttpRequestLog) SBOHttpRequestLogSetReferer(referer string, requestUri string) {
 	//sbol.Referer = referer
-	if len(referer) > 0 {
+	rx := regexp.MustCompile(`(\?|&)utm_source=([^&]+)(&|\z)`)
+	match := rx.FindStringSubmatch(requestUri)
+	if len(match) > 0 {
+		sbol.Referer = match[2]
+	} else if len(referer) > 0 {
 		parsed, err := url.Parse(referer)
 
 		if err == nil {
@@ -163,7 +166,7 @@ func ParseApacheCombinedLogFormat(line string) (*SBOHttpRequestLog, error) {
 	}
 
 	sbol.SBOHttpRequestLogSetPath(matches[6])
-	sbol.SBOHttpRequestLogSetReferer(matches[10])
+	sbol.SBOHttpRequestLogSetReferer(matches[10], matches[6])
 	sbol.SBOHttpRequestLogSetUserAgent(matches[11])
 
 	return &sbol, nil

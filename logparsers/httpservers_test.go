@@ -353,3 +353,27 @@ func TestParseHAProxyInvalidLogFormats(t *testing.T) {
 		})
 	}
 }
+
+func TestParseReferer(t *testing.T) {
+	/*
+
+
+	   149.102.254.35 - - [23/May/2025:03:53:41 +0000] "GET /wp-content/plugins/helloapx/wp-apxupx.php?apx=upx HTTP/1.1" 404 363 "https://casualgames.dev/wp-content/plugins/helloapx/wp-apxupx.php?apx=upx" "Go-http-client/1.1"
+	*/
+	{
+		line1 := `149.102.254.35 - - [23/May/2025:03:53:41 +0000] "GET /wp-content/plugins/helloapx/wp-apxupx.php?apx=upx&AAAutm_source=google HTTP/1.1" 301 549 "http://casualgames.dev/wp-content/plugins/helloapx/wp-apxupx.php?apx=upx" "Go-http-client/1.1"`
+		parsed, _ := ParseApacheCombinedLogFormat(line1)
+		if parsed.Referer != "casualgames.dev" {
+			t.Errorf("Expected %v, got %v", "casualgames.dev", parsed.Referer)
+		}
+	}
+
+	{
+		line1 := `149.102.254.35 - - [23/May/2025:03:53:41 +0000] "GET /wp-content/plugins/helloapx/wp-apxupx.php?apx=upx&utm_source=google&otherparam=1 HTTP/1.1" 301 549 "http://casualgames.dev/wp-content/plugins/helloapx/wp-apxupx.php?apx=upx" "Go-http-client/1.1"`
+		parsed, _ := ParseApacheCombinedLogFormat(line1)
+		if parsed.Referer != "google" {
+			t.Errorf("Expected %v, got %v", "google", parsed.Referer)
+		}
+	}
+
+}

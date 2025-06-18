@@ -95,9 +95,14 @@ func (handler *CounterHandler) Begin(dataToSaveChan chan *metrics.SBOMetricWindo
 	handler.topNWindowSize = topNSize
 	if following {
 		slog.Debug("CounterHandler.Begin following is true, starting ticker")
-		handler.ticker = time.NewTicker(time.Duration(outputIntervalSeconds) * time.Second)
-		handler.tickerStopped = make(chan bool)
-		go handler.tickerTick()
+		time.AfterFunc(time.Duration(2)*time.Second, func() {
+			//Print initial output, just to give the user something without waiting for the whole window duration
+			handler.PrintCounterData(false)
+			handler.startNewWindow()
+			handler.ticker = time.NewTicker(time.Duration(outputIntervalSeconds) * time.Second)
+			handler.tickerStopped = make(chan bool)
+			go handler.tickerTick()
+		})
 	} else {
 		slog.Debug("CounterHandler.Begin following is FALSE, NOT starting ticker")
 	}
@@ -175,10 +180,10 @@ func (handler *CounterHandler) HandleEntry(parsedLogEntry *logparsers.SBOHttpReq
 		handler.UserAgentOSFamilies[parsedLogEntry.UserAgent.OS].Increment(1)
 	}
 
-	if handler.Referers[parsedLogEntry.RefererDomain] == nil {
-		handler.Referers[parsedLogEntry.RefererDomain] = &CounterValue{CurrentValue: 1}
+	if handler.Referers[parsedLogEntry.Referer] == nil {
+		handler.Referers[parsedLogEntry.Referer] = &CounterValue{CurrentValue: 1}
 	} else {
-		handler.Referers[parsedLogEntry.RefererDomain].Increment(1)
+		handler.Referers[parsedLogEntry.Referer].Increment(1)
 	}
 
 	if handler.RequestedPaths[parsedLogEntry.Path] == nil {
@@ -342,8 +347,8 @@ func (handler *CounterHandler) printMapValue(header string, m map[string]*Counte
 			j++
 		}
 	}
-	if maxLabelLen > 20 {
-		maxLabelLen = 20
+	if maxLabelLen > 15 {
+		maxLabelLen = 15
 	}
 	slices.SortFunc(mapAsList, func(a, b CounterMapEntry) int {
 		if a.value.CurrentValue < b.value.CurrentValue {
@@ -360,7 +365,11 @@ func (handler *CounterHandler) printMapValue(header string, m map[string]*Counte
 	indent := strings.Repeat(" ", len(header))
 	linePrefix := header
 	for _, mapEntry := range mapAsList {
-		fmt.Printf("%s %-*v:%6v (%v)", linePrefix, maxLabelLen+1, mapEntry.key, mapEntry.value.CurrentValue, mapEntry.value.CurrentValue-mapEntry.value.PreviousValue)
+		keyValueToPrint := mapEntry.key
+		if len(keyValueToPrint) < 1 {
+			keyValueToPrint = "-not set-"
+		}
+		fmt.Printf("%s %-*v:%6v (%v)", linePrefix, maxLabelLen+1, keyValueToPrint, mapEntry.value.CurrentValue, mapEntry.value.CurrentValue-mapEntry.value.PreviousValue)
 		fmt.Println()
 		if i == 0 {
 			linePrefix = indent
