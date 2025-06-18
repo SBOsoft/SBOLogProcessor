@@ -3,7 +3,10 @@ package handlers
 import (
 	"fmt"
 	"log/slog"
+	"maps"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/SBOsoft/SBOLogProcessor/logparsers"
@@ -11,12 +14,18 @@ import (
 )
 
 const (
-	COUNTER_HANDLER_NAME string = "COUNTER"
+	COUNTER_HANDLER_NAME    string = "COUNTER"
+	COUNTER_TOP_N_RESULTS_N int    = 10
 )
 
 type CounterValue struct {
 	CurrentValue  int64
 	PreviousValue int64
+}
+
+type CounterMapEntry struct {
+	key   string
+	value *CounterValue
 }
 
 func (cv *CounterValue) Increment(value int64) {
@@ -33,29 +42,43 @@ type CounterHandler struct {
 	HandledEntryCounter   int
 	TotalRequests         *CounterValue
 	TotalBytesSent        *CounterValue
-	StatusCodes           map[string]*CounterValue
-	Methods               map[string]*CounterValue
-	Clients               map[string]*CounterValue
-	UserAgentFamilies     map[string]*CounterValue
-	UserAgentOSFamilies   map[string]*CounterValue
-	DeviceTypes           map[string]*CounterValue
 	RequestsFromNonHumans *CounterValue
 	RequestsFromHumans    *CounterValue
-	dataToBeSavedChannel  chan *metrics.SBOMetricWindowDataToBeSaved
-	ticker                *time.Ticker
-	tickerStopped         chan (bool)
+	MaliciousRequests     *CounterValue
+
+	StatusCodes         map[string]*CounterValue
+	Methods             map[string]*CounterValue
+	Clients             map[string]*CounterValue
+	UserAgentFamilies   map[string]*CounterValue
+	UserAgentOSFamilies map[string]*CounterValue
+	DeviceTypes         map[string]*CounterValue
+	Referers            map[string]*CounterValue
+	RequestedPaths      map[string]*CounterValue
+
+	dataToBeSavedChannel chan *metrics.SBOMetricWindowDataToBeSaved
+
+	ticker        *time.Ticker
+	tickerStopped chan (bool)
+	syncMutex     sync.Mutex
 }
 
 func NewCounterHandler(filePath string) *CounterHandler {
 
 	var rv = CounterHandler{
-		filePath:            filePath,
-		Clients:             make(map[string]*CounterValue),
-		Methods:             make(map[string]*CounterValue),
-		StatusCodes:         make(map[string]*CounterValue),
-		UserAgentFamilies:   make(map[string]*CounterValue),
-		UserAgentOSFamilies: make(map[string]*CounterValue),
-		DeviceTypes:         make(map[string]*CounterValue)}
+		filePath:              filePath,
+		TotalRequests:         &CounterValue{CurrentValue: 0, PreviousValue: 0},
+		TotalBytesSent:        &CounterValue{CurrentValue: 0, PreviousValue: 0},
+		RequestsFromNonHumans: &CounterValue{CurrentValue: 0, PreviousValue: 0},
+		RequestsFromHumans:    &CounterValue{CurrentValue: 0, PreviousValue: 0},
+		MaliciousRequests:     &CounterValue{CurrentValue: 0, PreviousValue: 0},
+		Clients:               make(map[string]*CounterValue),
+		Methods:               make(map[string]*CounterValue),
+		StatusCodes:           make(map[string]*CounterValue),
+		UserAgentFamilies:     make(map[string]*CounterValue),
+		UserAgentOSFamilies:   make(map[string]*CounterValue),
+		DeviceTypes:           make(map[string]*CounterValue),
+		Referers:              make(map[string]*CounterValue),
+		RequestedPaths:        make(map[string]*CounterValue)}
 
 	return &rv
 }
@@ -78,8 +101,11 @@ func (handler *CounterHandler) Begin(dataToSaveChan chan *metrics.SBOMetricWindo
 	return nil
 }
 
-// TODO decide how we will save generated metrics
 func (handler *CounterHandler) HandleEntry(parsedLogEntry *logparsers.SBOHttpRequestLog) (bool, error) {
+
+	handler.syncMutex.Lock()
+	defer handler.syncMutex.Unlock()
+
 	handler.HandledEntryCounter++
 	if handler.Clients[parsedLogEntry.ClientIP] == nil {
 		handler.Clients[parsedLogEntry.ClientIP] = &CounterValue{CurrentValue: 1}
@@ -101,6 +127,13 @@ func (handler *CounterHandler) HandleEntry(parsedLogEntry *logparsers.SBOHttpReq
 			handler.RequestsFromHumans = &CounterValue{CurrentValue: 1}
 		} else {
 			handler.RequestsFromHumans.Increment(1)
+		}
+	}
+	if parsedLogEntry.Malicious != logparsers.REQUEST_MALICIOUS_UNKNOWN {
+		if handler.MaliciousRequests == nil {
+			handler.MaliciousRequests = &CounterValue{CurrentValue: 1}
+		} else {
+			handler.MaliciousRequests.Increment(1)
 		}
 	}
 	if parsedLogEntry.UserAgent.Human == logparsers.Human_No {
@@ -138,6 +171,18 @@ func (handler *CounterHandler) HandleEntry(parsedLogEntry *logparsers.SBOHttpReq
 		handler.UserAgentOSFamilies[parsedLogEntry.UserAgent.OS].Increment(1)
 	}
 
+	if handler.Referers[parsedLogEntry.RefererDomain] == nil {
+		handler.Referers[parsedLogEntry.RefererDomain] = &CounterValue{CurrentValue: 1}
+	} else {
+		handler.Referers[parsedLogEntry.RefererDomain].Increment(1)
+	}
+
+	if handler.RequestedPaths[parsedLogEntry.Path] == nil {
+		handler.RequestedPaths[parsedLogEntry.Path] = &CounterValue{CurrentValue: 1}
+	} else {
+		handler.RequestedPaths[parsedLogEntry.Path].Increment(1)
+	}
+
 	return true, nil
 }
 
@@ -160,33 +205,119 @@ func (handler *CounterHandler) tickerTick() {
 			return
 		case <-handler.ticker.C:
 			handler.PrintCounterData(true)
+			handler.startNewWindow()
 		}
 	}
 }
 
+func (handler *CounterHandler) startNewWindow() {
+	slog.Debug("Starting new counting window")
+	handler.syncMutex.Lock()
+	defer handler.syncMutex.Unlock()
+
+	handler.RequestsFromHumans.PreviousValue = handler.RequestsFromHumans.CurrentValue
+	handler.RequestsFromNonHumans.PreviousValue = handler.RequestsFromNonHumans.CurrentValue
+	handler.TotalBytesSent.PreviousValue = handler.TotalBytesSent.CurrentValue
+	handler.TotalRequests.PreviousValue = handler.TotalRequests.CurrentValue
+	handler.MaliciousRequests.PreviousValue = handler.MaliciousRequests.CurrentValue
+
+	handler.ResetCountersInMapForNewWindow(handler.Clients)
+	handler.ResetCountersInMapForNewWindow(handler.DeviceTypes)
+	handler.ResetCountersInMapForNewWindow(handler.Methods)
+	handler.ResetCountersInMapForNewWindow(handler.StatusCodes)
+	handler.ResetCountersInMapForNewWindow(handler.UserAgentFamilies)
+	handler.ResetCountersInMapForNewWindow(handler.UserAgentOSFamilies)
+	handler.ResetCountersInMapForNewWindow(handler.Referers)
+	handler.ResetCountersInMapForNewWindow(handler.RequestedPaths)
+}
+
+func (handler *CounterHandler) ResetCountersInMapForNewWindow(theMap map[string]*CounterValue) {
+	if theMap == nil {
+		return
+	}
+	for _, v := range theMap {
+		v.PreviousValue = v.CurrentValue
+	}
+}
+
+func ShrinkCounterMapLeavingTopN(currentMap map[string]*CounterValue) map[string]*CounterValue {
+	var countsToKeysMap map[int64]map[string]int64 = make(map[int64]map[string]int64)
+	var countsForSorting []int64 = make([]int64, len(currentMap))
+
+	for keyValue, counterValue := range currentMap {
+		if countsToKeysMap[counterValue.CurrentValue] == nil {
+			countsToKeysMap[counterValue.CurrentValue] = make(map[string]int64)
+		}
+		countsToKeysMap[counterValue.CurrentValue][keyValue] = counterValue.CurrentValue
+	}
+	countsForSorting = slices.Sorted(maps.Keys(countsToKeysMap))
+	slices.Reverse(countsForSorting)
+	addedElementCounter := 0
+	newMapToReplace := make(map[string]*CounterValue)
+	/*
+		slog.Debug("ShrinkCounterMapLeavingTopN", "countsForSorting", countsForSorting)
+		slog.Debug("ShrinkCounterMapLeavingTopN", "countsToKeysMap", countsToKeysMap)
+		slog.Debug("ShrinkCounterMapLeavingTopN", "currentMap", currentMap)
+	*/
+outOf2Loops:
+	for _, countValue := range countsForSorting {
+		if countsToKeysMap[countValue] != nil {
+			for keyVal2, _ := range countsToKeysMap[countValue] {
+				if newMapToReplace[keyVal2] != nil {
+					//this should not happen but anyway
+					slog.Debug("Unexpected! key already exists in shrinked map", "key", keyVal2, "map", newMapToReplace)
+					continue
+				}
+				newMapToReplace[keyVal2] = &CounterValue{CurrentValue: currentMap[keyVal2].CurrentValue, PreviousValue: currentMap[keyVal2].PreviousValue}
+				addedElementCounter++
+				if addedElementCounter >= COUNTER_TOP_N_RESULTS_N {
+					break outOf2Loops
+				}
+			}
+		}
+	}
+	//slog.Debug("ShrinkCounterMapLeavingTopN", "newMapToReplace", newMapToReplace)
+	return newMapToReplace
+}
+
 func (handler *CounterHandler) PrintCounterData(fromTicker bool) {
-	fmt.Println("-----------------------------")
+	fmt.Printf("---------%v---------", time.Now().UTC().Format(time.RFC3339))
+	fmt.Println()
 	fmt.Printf("Total log lines   : %v", handler.HandledEntryCounter)
 	fmt.Println()
-	fmt.Printf("Total bytes sent  : %v (%v +%v)", handler.TotalBytesSent.CurrentValue, handler.TotalBytesSent.PreviousValue, handler.TotalBytesSent.CurrentValue-handler.TotalBytesSent.PreviousValue)
+	fmt.Printf("Total bytes sent  : %v (%v)", handler.TotalBytesSent.CurrentValue, handler.TotalBytesSent.CurrentValue-handler.TotalBytesSent.PreviousValue)
 	fmt.Println()
-	fmt.Printf("Total requests    : %v", handler.TotalRequests.CurrentValue)
+	fmt.Printf("Total requests    : %v (%v)", handler.TotalRequests.CurrentValue, handler.TotalRequests.CurrentValue-handler.TotalRequests.PreviousValue)
 	fmt.Println()
 	if handler.RequestsFromHumans != nil {
-		fmt.Printf("Requests by humans: %v", handler.RequestsFromHumans.CurrentValue)
+		fmt.Printf("Requests by humans: %v (%v)", handler.RequestsFromHumans.CurrentValue, handler.RequestsFromHumans.CurrentValue-handler.RequestsFromHumans.PreviousValue)
 		fmt.Println()
 	}
 	if handler.RequestsFromNonHumans != nil {
-		fmt.Printf("Non-human requests: %v", handler.RequestsFromNonHumans.CurrentValue)
+		fmt.Printf("Non-human requests: %v (%v)", handler.RequestsFromNonHumans.CurrentValue, handler.RequestsFromNonHumans.CurrentValue-handler.RequestsFromNonHumans.PreviousValue)
 		fmt.Println()
 	}
+	if handler.MaliciousRequests != nil {
+		fmt.Printf("Malicious requests: %v (%v)", handler.MaliciousRequests.CurrentValue, handler.MaliciousRequests.CurrentValue-handler.MaliciousRequests.PreviousValue)
+		fmt.Println()
+	}
+
 	handler.printMapValue("Status codes      :", handler.StatusCodes)
 
 	handler.printMapValue("Methods           :", handler.Methods)
 	handler.printMapValue("User agents       :", handler.UserAgentFamilies)
 	handler.printMapValue("Operating systems :", handler.UserAgentOSFamilies)
+
+	handler.Clients = ShrinkCounterMapLeavingTopN(handler.Clients)
+	handler.printMapValue("Clients           :", handler.Clients)
+
+	handler.Referers = ShrinkCounterMapLeavingTopN(handler.Referers)
+	handler.printMapValue("Referers          :", handler.Referers)
+
+	handler.RequestedPaths = ShrinkCounterMapLeavingTopN(handler.RequestedPaths)
+	handler.printMapValue("Requested Path    :", handler.RequestedPaths)
+
 	fmt.Println()
-	fmt.Println("-----------------------------")
 
 }
 
@@ -194,11 +325,38 @@ func (handler *CounterHandler) printMapValue(header string, m map[string]*Counte
 	if m == nil {
 		return
 	}
+	maxLabelLen := 10
+	mapAsList := make([]CounterMapEntry, len(m))
+
+	{
+		j := 0
+		for k, v := range m {
+			mapAsList[j] = CounterMapEntry{key: k, value: v}
+			if len(k) > maxLabelLen {
+				maxLabelLen = len(k)
+			}
+			j++
+		}
+	}
+	if maxLabelLen > 20 {
+		maxLabelLen = 20
+	}
+	slices.SortFunc(mapAsList, func(a, b CounterMapEntry) int {
+		if a.value.CurrentValue < b.value.CurrentValue {
+			return -1
+		}
+		if a.value.CurrentValue > b.value.CurrentValue {
+			return 1
+		}
+		return 0
+	})
+	slices.Reverse(mapAsList)
+
 	i := 0
 	indent := strings.Repeat(" ", len(header))
 	linePrefix := header
-	for k, v := range m {
-		fmt.Printf("%s %-8v:%6v (%v)", linePrefix, k, v.CurrentValue, v.CurrentValue-v.PreviousValue)
+	for _, mapEntry := range mapAsList {
+		fmt.Printf("%s %-*v:%6v (%v)", linePrefix, maxLabelLen+1, mapEntry.key, mapEntry.value.CurrentValue, mapEntry.value.CurrentValue-mapEntry.value.PreviousValue)
 		fmt.Println()
 		if i == 0 {
 			linePrefix = indent
