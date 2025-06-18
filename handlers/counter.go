@@ -14,8 +14,7 @@ import (
 )
 
 const (
-	COUNTER_HANDLER_NAME    string = "COUNTER"
-	COUNTER_TOP_N_RESULTS_N int    = 10
+	COUNTER_HANDLER_NAME string = "COUNTER"
 )
 
 type CounterValue struct {
@@ -57,9 +56,10 @@ type CounterHandler struct {
 
 	dataToBeSavedChannel chan *metrics.SBOMetricWindowDataToBeSaved
 
-	ticker        *time.Ticker
-	tickerStopped chan (bool)
-	syncMutex     sync.Mutex
+	ticker         *time.Ticker
+	tickerStopped  chan (bool)
+	syncMutex      sync.Mutex
+	topNWindowSize int
 }
 
 func NewCounterHandler(filePath string) *CounterHandler {
@@ -87,11 +87,15 @@ func (handler *CounterHandler) Name() string {
 	return COUNTER_HANDLER_NAME
 }
 
-func (handler *CounterHandler) Begin(dataToSaveChan chan *metrics.SBOMetricWindowDataToBeSaved, following bool) error {
+func (handler *CounterHandler) Begin(dataToSaveChan chan *metrics.SBOMetricWindowDataToBeSaved,
+	following bool,
+	outputIntervalSeconds int,
+	topNSize int) error {
 	handler.dataToBeSavedChannel = dataToSaveChan
+	handler.topNWindowSize = topNSize
 	if following {
 		slog.Debug("CounterHandler.Begin following is true, starting ticker")
-		handler.ticker = time.NewTicker(30 * time.Second)
+		handler.ticker = time.NewTicker(time.Duration(outputIntervalSeconds) * time.Second)
 		handler.tickerStopped = make(chan bool)
 		go handler.tickerTick()
 	} else {
@@ -240,7 +244,7 @@ func (handler *CounterHandler) ResetCountersInMapForNewWindow(theMap map[string]
 	}
 }
 
-func ShrinkCounterMapLeavingTopN(currentMap map[string]*CounterValue) map[string]*CounterValue {
+func ShrinkCounterMapLeavingTopN(currentMap map[string]*CounterValue, topNSize int) map[string]*CounterValue {
 	var countsToKeysMap map[int64]map[string]int64 = make(map[int64]map[string]int64)
 	var countsForSorting []int64 = make([]int64, len(currentMap))
 
@@ -270,7 +274,7 @@ outOf2Loops:
 				}
 				newMapToReplace[keyVal2] = &CounterValue{CurrentValue: currentMap[keyVal2].CurrentValue, PreviousValue: currentMap[keyVal2].PreviousValue}
 				addedElementCounter++
-				if addedElementCounter >= COUNTER_TOP_N_RESULTS_N {
+				if addedElementCounter >= topNSize {
 					break outOf2Loops
 				}
 			}
@@ -308,13 +312,13 @@ func (handler *CounterHandler) PrintCounterData(fromTicker bool) {
 	handler.printMapValue("User agents       :", handler.UserAgentFamilies)
 	handler.printMapValue("Operating systems :", handler.UserAgentOSFamilies)
 
-	handler.Clients = ShrinkCounterMapLeavingTopN(handler.Clients)
+	handler.Clients = ShrinkCounterMapLeavingTopN(handler.Clients, handler.topNWindowSize)
 	handler.printMapValue("Clients           :", handler.Clients)
 
-	handler.Referers = ShrinkCounterMapLeavingTopN(handler.Referers)
+	handler.Referers = ShrinkCounterMapLeavingTopN(handler.Referers, handler.topNWindowSize)
 	handler.printMapValue("Referers          :", handler.Referers)
 
-	handler.RequestedPaths = ShrinkCounterMapLeavingTopN(handler.RequestedPaths)
+	handler.RequestedPaths = ShrinkCounterMapLeavingTopN(handler.RequestedPaths, handler.topNWindowSize)
 	handler.printMapValue("Requested Path    :", handler.RequestedPaths)
 
 	fmt.Println()

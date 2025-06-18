@@ -23,9 +23,11 @@ import (
 )
 
 const (
-	SBO_GLOBAL_PROFILE_METRICS  string = "metrics"
-	SBO_GLOBAL_PROFILE_COUNT    string = "count"
-	SBO_GLOBAL_PROFILE_SECURITY string = "security"
+	SBO_GLOBAL_PROFILE_METRICS      string = "metrics"
+	SBO_GLOBAL_PROFILE_COUNT        string = "count"
+	SBO_GLOBAL_PROFILE_SECURITY     string = "security"
+	COUNTER_TOPN_SIZE_DEFAULT       int    = 10
+	COUNTER_OUTPUT_INTERVAL_DEFAULT int    = 30
 )
 
 var globalConfig map[string]ConfigForAMonitoredFile = make(map[string]ConfigForAMonitoredFile)
@@ -94,12 +96,14 @@ func parseCommandArgs() {
 
 				HandlerInstances: make(map[string]SBOLogHandlerInterface, 1),
 
-				WriteMetricsToDb:       false,
-				DbAddress:              "127.0.0.1:23306",
-				DbUser:                 "root",
-				DbPassword:             "sboanalyticsrootpw",
-				DbDatabase:             "sboanalytics",
-				ReplaceExistingMetrics: true}
+				WriteMetricsToDb:             false,
+				DbAddress:                    "127.0.0.1:23306",
+				DbUser:                       "root",
+				DbPassword:                   "sboanalyticsrootpw",
+				DbDatabase:                   "sboanalytics",
+				ReplaceExistingMetrics:       true,
+				CounterTopNForKeyedMetrics:   COUNTER_TOPN_SIZE_DEFAULT,
+				CounterOutputIntervalSeconds: COUNTER_OUTPUT_INTERVAL_DEFAULT}
 
 			globalConfig[cfFromCmdLine.FilePath] = cfFromCmdLine
 		} else {
@@ -132,23 +136,33 @@ func loadConfigFromFile(configFileName string) bool {
 				} else {
 					loadedConfigFromFile = true
 					for fp, conf := range configLoadedFromFile {
+						//validation and defaults
+						if conf.CounterOutputIntervalSeconds < 1 {
+							conf.CounterOutputIntervalSeconds = 30
+						}
+						if conf.CounterTopNForKeyedMetrics < 1 || conf.CounterTopNForKeyedMetrics > 100 {
+							conf.CounterTopNForKeyedMetrics = 10
+						}
 						globalConfig[fp] = ConfigForAMonitoredFile{
-							Enabled:                conf.Enabled,
-							FilePath:               conf.FilePath,
-							Handlers:               conf.Handlers,
-							StartFrom:              conf.StartFrom,
-							SkipIfLineMatchesRegex: conf.SkipIfLineMatchesRegex,
-							Follow:                 conf.Follow,
-							DomainName:             conf.DomainName,
-							TimeWindowSizeMinutes:  conf.TimeWindowSizeMinutes,
-							WriteToFileTargetFile:  conf.WriteToFileTargetFile,
-							HandlerInstances:       make(map[string]SBOLogHandlerInterface),
-							WriteMetricsToDb:       conf.WriteMetricsToDb,
-							DbAddress:              conf.DbAddress,
-							DbUser:                 conf.DbUser,
-							DbPassword:             conf.DbPassword,
-							DbDatabase:             conf.DbDatabase,
-							ReplaceExistingMetrics: conf.ReplaceExistingMetrics}
+							Enabled:                      conf.Enabled,
+							FilePath:                     conf.FilePath,
+							Handlers:                     conf.Handlers,
+							StartFrom:                    conf.StartFrom,
+							SkipIfLineMatchesRegex:       conf.SkipIfLineMatchesRegex,
+							Follow:                       conf.Follow,
+							DomainName:                   conf.DomainName,
+							TimeWindowSizeMinutes:        conf.TimeWindowSizeMinutes,
+							WriteToFileTargetFile:        conf.WriteToFileTargetFile,
+							HandlerInstances:             make(map[string]SBOLogHandlerInterface),
+							WriteMetricsToDb:             conf.WriteMetricsToDb,
+							DbAddress:                    conf.DbAddress,
+							DbUser:                       conf.DbUser,
+							DbPassword:                   conf.DbPassword,
+							DbDatabase:                   conf.DbDatabase,
+							ReplaceExistingMetrics:       conf.ReplaceExistingMetrics,
+							CounterTopNForKeyedMetrics:   conf.CounterTopNForKeyedMetrics,
+							CounterOutputIntervalSeconds: conf.CounterOutputIntervalSeconds}
+
 					}
 					slog.Info("Loaded config from file", "file", configFileName, "configuration", globalConfig)
 				}
@@ -173,7 +187,10 @@ func createHandler(filePath string, handlerName string, dataToSaveChan chan *met
 		return metricsGenerator
 	case handlerName == handlers.COUNTER_HANDLER_NAME:
 		counterHandler := handlers.NewCounterHandler(filePath)
-		counterHandler.Begin(dataToSaveChan, globalConfig[filePath].Follow)
+		counterHandler.Begin(dataToSaveChan,
+			globalConfig[filePath].Follow,
+			globalConfig[filePath].CounterOutputIntervalSeconds,
+			globalConfig[filePath].CounterTopNForKeyedMetrics)
 		slog.Info("Created CounterHandler")
 		return counterHandler
 	}
@@ -573,6 +590,10 @@ type ConfigForAMonitoredFile struct {
 	DbPassword             string
 	DbDatabase             string
 	ReplaceExistingMetrics bool
+	//number of top N items like IP addresses to be displayed in outputs
+	CounterTopNForKeyedMetrics int
+	//when following, interval for updating stats/output
+	CounterOutputIntervalSeconds int
 }
 
 // ///////////////handlers
