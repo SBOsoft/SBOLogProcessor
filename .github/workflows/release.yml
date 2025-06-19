@@ -51,26 +51,26 @@ jobs:
 
       - name: Build and package for Linux
         run: |
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.version=${{ env.RELEASE_VERSION }}" -o myapp-linux-amd64
-          tar -czvf myapp-linux-amd64-${{ env.RELEASE_VERSION }}.tar.gz myapp-linux-amd64
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.version=${{ env.RELEASE_VERSION }}" -o SBOLogProcessor
+          tar -czvf SBOLogProcessor-linux-amd64-${{ env.RELEASE_VERSION }}.tar.gz SBOLogProcessor
         working-directory: ./ # Adjust if your main.go is in a subfolder
 
       - name: Build and package for Windows
         run: |
-          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "-X main.version=${{ env.RELEASE_VERSION }}" -o myapp-windows-amd64.exe
-          zip myapp-windows-amd64-${{ env.RELEASE_VERSION }}.zip myapp-windows-amd64.exe
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "-X main.version=${{ env.RELEASE_VERSION }}" -o SBOLogProcessor.exe
+          zip SBOLogProcessor-windows-amd64-${{ env.RELEASE_VERSION }}.zip SBOLogProcessor.exe
         working-directory: ./
 
       - name: Build and package for macOS (AMD64)
         run: |
-          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags "-X main.version=${{ env.RELEASE_VERSION }}" -o myapp-darwin-amd64
-          tar -czvf myapp-darwin-amd64-${{ env.RELEASE_VERSION }}.tar.gz myapp-darwin-amd64
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags "-X main.version=${{ env.RELEASE_VERSION }}" -o SBOLogProcessor
+          tar -czvf SBOLogProcessor-darwin-amd64-${{ env.RELEASE_VERSION }}.tar.gz SBOLogProcessor
         working-directory: ./
 
       - name: Build and package for macOS (ARM64 - Apple Silicon)
         run: |
-          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags "-X main.version=${{ env.RELEASE_VERSION }}" -o myapp-darwin-arm64
-          tar -czvf myapp-darwin-arm64-${{ env.RELEASE_VERSION }}.tar.gz myapp-darwin-arm64
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags "-X main.version=${{ env.RELEASE_VERSION }}" -o SBOLogProcessor
+          tar -czvf SBOLogProcessor-darwin-arm64-${{ env.RELEASE_VERSION }}.tar.gz SBOLogProcessor
         working-directory: ./
 
       - name: Create Release
