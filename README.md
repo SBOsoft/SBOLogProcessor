@@ -1,32 +1,49 @@
 # SBOLogProcessor
-Log processor for SBOanalytics
+Access Log Processor and Metrics Generator
 
-The purpose of this tool is to monitor web server to:
+There are 3 main use cases (profiles) supported by this tool:
 
- 1. Generate metrics
- 2. Allow users to view realtime metrics by running the tool on the command line
- 3. Push metrics to a SBOanalytics database
- 4. Report on web site visitors
- 5. Report on non-human visitors, e.g google bot, scanners, malicious actors
+ 1. Counter mode (when -p=count option is provided): Counts logs from an access log file and prints statistics to stdout
+ 2. Metrics generator (when -p=metrics option is provided): Processes logs from an access log file (or files) and generates metrics, which can be saved into a mysql database to be used with SBOAnalytics (a web front-end for metrics) or just printed to stdout.
+ 3. Security mode (when -p=security option is provided): (Not implemented yet) Processes logs from an access log file and outputs potential security issues (e.g abuser, stats on sql injection attempts etc) giving you a list of IPs and/or patterns that you may want to block
+
+# Usage 
+
+## Binary releases
+Download a precompiled binary from [releases](https://github.com/SBOsoft/SBOLogProcessor/releases) page, unzip/untar and execute sbologp (or sbologp.exe on windows) command.
+
+## Command line options and configuration
+
+Run `sbologp -h` to see available command line options.
+
+There are too many options which may not have a corresponding command line parameter so if you need more control, passing a configuration file using -c option might be required.
+
+See https://github.com/SBOsoft/SBOLogProcessor/tree/main/conf/example-config-file.json for configuration examples.
+Configuration must be a json map, with file paths as keys. 
 
 
-The primary goal is to provide realtime metrics from the command line by following realtime changes to log files, 
-e.g top offending IPs (e.g so you can block them).
-The secondary goal of this tool is to generate insights about web site visitors, to replace Google analytics.
-
-
-# Build and Run
+# Build and run
 
 ## Development
+
+Install go first
 
 ### Build
 
 Build
-```go build -o ./output/bin/sbologc```
+```go build -o ./output/bin/sbologp```
 
 Clean
 ```go clean```
 
 ### Run
+Use `go run . -option1 -option2 path-to-access-log-file`  
 
-```go run . -f=true ./test-data/testfile.txt```
+For example: 
+```go run . -f -h=COUNTER -p=count /var/log/apache2/access.log```
+
+### Run tests
+
+`go test ./...` in project root folder or `go test ./...` in a sub-folder.
+
+Do NOT expect high test coverage.

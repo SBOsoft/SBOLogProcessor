@@ -28,6 +28,8 @@ const (
 	SBO_GLOBAL_PROFILE_SECURITY     string = "security"
 	COUNTER_TOPN_SIZE_DEFAULT       int    = 10
 	COUNTER_OUTPUT_INTERVAL_DEFAULT int    = 30
+
+	SBO_LOGP_LOG_FILE string = "./sbologp-logs.log"
 )
 
 var globalConfig map[string]ConfigForAMonitoredFile = make(map[string]ConfigForAMonitoredFile)
@@ -38,7 +40,11 @@ func main() {
 		log.Fatal("Please provide a file path as argument")
 	}
 
-	configureLogging()
+	var logFile *os.File = configureLogging(slog.LevelDebug)
+	if logFile != nil {
+		defer logFile.Close()
+	}
+
 	parseCommandArgs()
 
 	var wg sync.WaitGroup
@@ -57,19 +63,40 @@ func parseCommandArgs() {
 	confFilePtr := flag.String("c", "", "Configuration file in json format. There is no default value but you will want to pass a config file when -m=metrics. ")
 
 	followPtr := flag.Bool("f", false, "Follow changes to the file, as in tail -f")
-	windowSizePtr := flag.Int("w", 1, "Statistics window size in minutes, e.g to report request statistics for every 5 minute window. Defaults to 300, 5 minute")
+	windowSizePtr := flag.Int("w", 1, "Statistics window size in minutes, e.g to report request statistics for every 5 minute window.")
 	startFromPtr := flag.Int("s", START_FROM_BEGINNING, "When 0, file will be processed starting from the beginning. When -1, file will be processed starting from the end (i.e only lines appended after the program starts will be processed). Defaults to 0")
 	domainPtr := flag.String("d", "", "Domain name to report, needed when domain names are not available in logs")
-	handlerPtr := flag.String("h", "", "Enabled handler name, defaults to METRICS")
+	handlerPtr := flag.String("a", "", "Enabled handler name, defaults to METRICS. Note: It's NOT possible to pass multiple handlers using command line parameters, you need to use a configuration file if you need to enable multiple handlers.")
 	writeToFileTargetPtr := flag.String("t", "", "Target file path, required when handler is WRITE_TO_FILE")
 
+	counterTopNPtr := flag.Int("n", COUNTER_TOPN_SIZE_DEFAULT, "Applies to count profile only: Number of items (such as IP addresses, referers, paths) to be displayed. Only the top n items will be displayed in the output.")
+	counterOutputIntervalPtr := flag.Int("i", COUNTER_OUTPUT_INTERVAL_DEFAULT, "Applies to count profile only: Number of seconds between successive count outputs")
+
+	helpPtr := flag.Bool("h", false, "Show command line parameters")
+
 	flag.Parse()
+
+	if *helpPtr {
+		fmt.Println()
+		fmt.Println("SBOLogProcessor command line tool for monitoring web server access logs and more. See https://github.com/SBOsoft/SBOLogProcessor for more details")
+		fmt.Println("Passing a configuration file using -c parameter is the recommended method for providing configuration options.")
+		fmt.Println("Command line arguments should suffice for the counter profile BUT a command line parameter for every possible configuration option may NOT be available.")
+		fmt.Println()
+		fmt.Println("Usage: 'sbologp [command line options, e.g -f -p=metrics] access-log-file-path' OR 'sbologp -c path-to-config-file.json'")
+		fmt.Println("For example: ./sbologp -f -p=count /var/log/apache/access.log OR ./sbologp -c sbologp-config.json")
+		flag.PrintDefaults()
+		os.Exit(0)
+	}
 
 	globalActiveProfile = *profilePtr
 	if globalActiveProfile != SBO_GLOBAL_PROFILE_COUNT &&
 		globalActiveProfile != SBO_GLOBAL_PROFILE_METRICS &&
 		globalActiveProfile != SBO_GLOBAL_PROFILE_SECURITY {
-		panic(fmt.Sprintf("Invalid operating mode value: '%s' ", globalActiveProfile))
+		fmt.Printf("Invalid profile value (invalid -p parameter): '%s' ", globalActiveProfile)
+		fmt.Println()
+		fmt.Println("Use -h parameter to view command line options")
+		//flag.PrintDefaults()
+		os.Exit(1)
 	}
 
 	configFileName := *confFilePtr
@@ -81,7 +108,17 @@ func parseCommandArgs() {
 
 	if !loadedConfigFromFile {
 		if len(flag.Arg(0)) > 0 {
-			//TODO fix this, creating config here is temporary/dev only. config file should be passed as an arg
+			handlerName := *handlerPtr
+			//default handlers for profiles
+			if len(handlerName) < 1 {
+				if globalActiveProfile == SBO_GLOBAL_PROFILE_COUNT {
+					handlerName = handlers.COUNTER_HANDLER_NAME
+				} else if globalActiveProfile == SBO_GLOBAL_PROFILE_METRICS {
+					handlerName = handlers.METRIC_GENERATOR_HANDLER_NAME
+				}
+			}
+
+			//Creating config here is not the best way to invoke the program
 			var cfFromCmdLine = ConfigForAMonitoredFile{
 				Follow:                *followPtr,
 				StartFrom:             *startFromPtr,
@@ -89,7 +126,7 @@ func parseCommandArgs() {
 
 				DomainName: *domainPtr,
 
-				Handlers: []string{*handlerPtr},
+				Handlers: []string{handlerName}, //<- only 1 handler is supported
 
 				FilePath:              flag.Arg(0),
 				WriteToFileTargetFile: *writeToFileTargetPtr,
@@ -102,12 +139,13 @@ func parseCommandArgs() {
 				DbPassword:                   "sboanalyticsrootpw",
 				DbDatabase:                   "sboanalytics",
 				ReplaceExistingMetrics:       true,
-				CounterTopNForKeyedMetrics:   COUNTER_TOPN_SIZE_DEFAULT,
-				CounterOutputIntervalSeconds: COUNTER_OUTPUT_INTERVAL_DEFAULT}
+				CounterTopNForKeyedMetrics:   *counterTopNPtr,
+				CounterOutputIntervalSeconds: *counterOutputIntervalPtr}
 
 			globalConfig[cfFromCmdLine.FilePath] = cfFromCmdLine
 		} else {
-			log.Fatalf("Invalid options, cannot continue. Either a configuration file or command line parameters are required")
+			fmt.Println("Invalid options, cannot continue, missing log file path. Either a configuration file or command line parameters are required. Use -h parameter to view command line options. See https://github.com/SBOsoft/SBOLogProcessor for more details")
+			os.Exit(1)
 		}
 
 	}
@@ -216,15 +254,25 @@ func processFile(filePath string, wg *sync.WaitGroup) {
 	defer wg.Done()
 }
 
-func configureLogging() {
+func configureLogging(logLevel slog.Level) *os.File {
 	////////log config
-	slog.SetLogLoggerLevel(slog.LevelDebug)
-	logHandler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})
-	slog.SetDefault(slog.New(logHandler))
+	slog.SetLogLoggerLevel(logLevel)
 	log.SetFlags(log.Ldate | log.Lmicroseconds)
-	//disable all logging
-	//slog.SetLogLoggerLevel(math.MaxInt)
 
+	logFile, err := os.OpenFile(SBO_LOGP_LOG_FILE, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		// If we can't open the log file, log to stderr and exit.
+		slog.Error(fmt.Sprintf("Failed to open log file '%v'. Will log to stderr instead", SBO_LOGP_LOG_FILE), "error", err)
+		logHandler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
+		slog.SetDefault(slog.New(logHandler))
+		return nil
+	} else {
+		logHandler := slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: logLevel})
+		slog.SetDefault(slog.New(logHandler))
+		return logFile
+	}
+	//to disable all logging
+	//slog.SetLogLoggerLevel(math.MaxInt)
 }
 
 /*

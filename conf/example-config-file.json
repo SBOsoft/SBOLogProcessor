@@ -1,0 +1,56 @@
+{
+    "/var/log/apache2/example.com-access.log": {
+        "Enabled": true,
+        "FilePath": "/var/log/apache2/example.com-access.log",
+        "Handlers": [
+            "Available handlers are as follows, in theory you can use more than one handler and each processed log line will be passed to each configured handler in the order defined here BUT mixing METRICS and COUNTER handlers may not work as expected",
+            "METRICS",
+            "COUNTER",
+            "WRITE_TO_FILE"
+        ],
+        "StartFrom": 0,
+        "SkipIfLineMatchesRegex": null,
+        "Follow": false,
+        "DomainName": "example.com",
+        "TimeWindowSizeMinutes": 1,
+        "WriteToFileTargetFile": null,
+        "WriteMetricsToDb": false,
+        "DbAddress":"",
+        "DbUser":"",
+        "DbPassword":"",
+        "DbDatabase":"",
+        "ReplaceExistingMetrics":false,
+        "CounterTopNForKeyedMetrics": 10,
+        "CounterOutputIntervalSeconds": 30
+    },
+    "/var/log/apache2/COUNTER-example-access.log": {
+        "Enabled": true,
+        "FilePath": "/var/log/apache2/COUNTER-example-access.log",
+        "Handlers": [
+            "COUNTER"
+        ],
+        "StartFrom": -1,
+        "SkipIfLineMatchesRegex": null,
+        "Follow": true,
+        "CounterTopNForKeyedMetrics": 10,
+        "CounterOutputIntervalSeconds": 30
+    },
+     "/var/log/apache2/METRICS-example-access.log": {
+        "Enabled": true,
+        "FilePath": "/var/log/apache2/METRICS-example-access.log",
+        "Handlers": [
+            "METRICS"
+        ],
+        "StartFrom": 0,
+        "SkipIfLineMatchesRegex": null,
+        "Follow": true,
+        "DomainName": "example.com",
+        "TimeWindowSizeMinutes": 1,
+        "WriteMetricsToDb": true,
+        "DbAddress":"127.0.0.1:3306",
+        "DbUser":"amysqluser",
+        "DbPassword":"pwdforthemysqluser",
+        "DbDatabase":"sboanalytics",
+        "ReplaceExistingMetrics":false
+    }
+}
