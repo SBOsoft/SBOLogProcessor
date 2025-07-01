@@ -55,7 +55,10 @@ const (
 	UAFamily_SearchBot string = "SearchBot"
 	UAFamily_AIBot     string = "AIBot"
 	UAFamily_Script    string = "Script"
+	UAFamily_SocialBot string = "SocialBot"
 	UAFamily_OtherBot  string = "OtherBot"
+	UAFamily_SEOBot    string = "SEOBot"
+	UAFamily_Scanner   string = "Scanner"
 
 	OSFamily_Other   string = "Other"
 	OSFamily_Windows string = "Windows"
@@ -73,10 +76,24 @@ const (
 	Human_No      string = "Not Human"
 	Human_Unknown string = "Unknown"
 
-	RequestIntent_Unknown   string = "Unknown"
-	RequestIntent_Scraping  string = "Scraping"
-	RequestIntent_Malicious string = "Malicious"
+	RequestIntent_Unknown    string = "Unknown"
+	RequestIntent_Scraping   string = "Scraping"
+	RequestIntent_Malicious  string = "Malicious"
+	RequestIntent_Scanning   string = "Scanning"
+	RequestIntent_Processing string = "Processing"
 )
+
+var reSearchBots *regexp.Regexp = regexp.MustCompile(`(googlebot|bingbot|baiduspider|yandexbot|duckduckbot)`)
+
+var reSocialBots *regexp.Regexp = regexp.MustCompile(`(facebookexternalhit|twitterbot|linkedinbot|pinterestbot|slackbot|bytespider)`)
+
+var reMarketingBots *regexp.Regexp = regexp.MustCompile(`(ahrefsbot|semrushbot|dotbot|mj12bot|seobilitybot|siteauditbot)`)
+
+var reAIBots *regexp.Regexp = regexp.MustCompile(`(gptbot|chatgpt|google-extended|claudebot|meta-externalagent|amazonbot|perplexitybot|youbot)`)
+
+var reScannerBots *regexp.Regexp = regexp.MustCompile(`(censysinspect|expanse|aliyunsecbot|nmap|masscan|zgrab|shodanbot|urlscan)`)
+
+var reScriptAgents *regexp.Regexp = regexp.MustCompile(`(curl|scrapy|wget|python|go-http-client|java|ruby|okhttp|postman|axios|guzzlehttp|headlesschrome|phantomjs|cloudflare-traffic-manager)`)
 
 type SBOUserAgent struct {
 	FullName   string
@@ -96,40 +113,54 @@ func NewSBOUserAgent(uaString string) *SBOUserAgent {
 		Human:      Human_Unknown,
 		Intent:     RequestIntent_Unknown}
 
-	before, after, found := strings.Cut(uaString, " ")
-
-	if !found {
-		lowerBefore := strings.ToLower(before)
-		if strings.Contains(lowerBefore, "google") {
-			ua.Family = UAFamily_SearchBot
-		} else if strings.HasPrefix(lowerBefore, "facebook") {
-			ua.Family = UAFamily_OtherBot
-			ua.DeviceType = DeviceType_Script
-		} else if strings.HasPrefix(lowerBefore, "meta-") {
-			ua.Family = UAFamily_AIBot
-			ua.DeviceType = DeviceType_Script
-		} else if strings.Contains(lowerBefore, "curl") || strings.HasPrefix(lowerBefore, "go-") || strings.Contains(lowerBefore, "java") || strings.Contains(lowerBefore, "apache") || strings.Contains(lowerBefore, "php") || strings.Contains(lowerBefore, "python") || strings.Contains(lowerBefore, "requests") {
-			ua.Family = UAFamily_Script
-		} else {
-			//ua.Human = Human_No
-		}
+	lowerUaString := strings.ToLower(uaString)
+	if foundMatch := reSearchBots.FindString(lowerUaString); len(foundMatch) > 0 {
+		ua.DeviceType = DeviceType_Script
+		ua.Family = UAFamily_SearchBot
 		ua.Human = Human_No
+		ua.Intent = RequestIntent_Processing
+	} else if foundMatch := reSocialBots.FindString(lowerUaString); len(foundMatch) > 0 {
+		ua.DeviceType = DeviceType_Script
+		ua.Family = UAFamily_SocialBot
+		ua.Human = Human_No
+		ua.Intent = RequestIntent_Processing
+	} else if foundMatch := reMarketingBots.FindString(lowerUaString); len(foundMatch) > 0 {
+		ua.DeviceType = DeviceType_Script
+		ua.Family = UAFamily_SEOBot
+		ua.Human = Human_No
+		ua.Intent = RequestIntent_Processing
+	} else if foundMatch := reAIBots.FindString(lowerUaString); len(foundMatch) > 0 {
+		ua.DeviceType = DeviceType_Script
+		ua.Family = UAFamily_AIBot
+		ua.Human = Human_No
+		ua.Intent = RequestIntent_Processing
+	} else if foundMatch := reScannerBots.FindString(lowerUaString); len(foundMatch) > 0 {
+		ua.DeviceType = DeviceType_Script
+		ua.Family = UAFamily_Scanner
+		ua.Human = Human_No
+		ua.Intent = RequestIntent_Scanning
+	} else if foundMatch := reScriptAgents.FindString(lowerUaString); len(foundMatch) > 0 {
+		ua.DeviceType = DeviceType_Script
+		ua.Family = UAFamily_Script
+		ua.Human = Human_No
+		ua.Intent = RequestIntent_Scraping
 	} else {
-		if strings.HasPrefix(before, "facebook") {
-			ua.Family = UAFamily_OtherBot
-			ua.DeviceType = DeviceType_Script
-			ua.Human = Human_No
-		} else if strings.HasPrefix(before, "meta-") {
-			ua.Family = UAFamily_AIBot
-			ua.DeviceType = DeviceType_Script
-			ua.Human = Human_No
-		} else if strings.HasSuffix(after, "Bytespider") {
-			ua.Family = UAFamily_OtherBot
-			ua.DeviceType = DeviceType_Script
-			ua.Human = Human_No
-		} else if strings.HasSuffix(after, "Python") {
-			ua.Family = UAFamily_Script
-			ua.DeviceType = DeviceType_Script
+		before, after, found := strings.Cut(uaString, " ")
+		if !found {
+			lowerBefore := strings.ToLower(before)
+			if strings.Contains(lowerBefore, "google") {
+				ua.Family = UAFamily_SearchBot
+			} else if strings.HasPrefix(lowerBefore, "facebook") {
+				ua.Family = UAFamily_OtherBot
+				ua.DeviceType = DeviceType_Script
+			} else if strings.HasPrefix(lowerBefore, "meta-") {
+				ua.Family = UAFamily_AIBot
+				ua.DeviceType = DeviceType_Script
+			} else if strings.Contains(lowerBefore, "curl") || strings.HasPrefix(lowerBefore, "go-") || strings.Contains(lowerBefore, "java") || strings.Contains(lowerBefore, "apache") || strings.Contains(lowerBefore, "php") || strings.Contains(lowerBefore, "python") || strings.Contains(lowerBefore, "requests") {
+				ua.Family = UAFamily_Script
+			} else {
+				//ua.Human = Human_No
+			}
 			ua.Human = Human_No
 		} else {
 			var foundCrios bool = false
@@ -198,13 +229,7 @@ func NewSBOUserAgent(uaString string) *SBOUserAgent {
 						ua.DeviceType = DeviceType_Script
 					}
 				}
-				/*
-					for x := range v {
-						fmt.Printf("matches %v %v %v \n", x, v[x], len(v[x]))
-					}
-				*/
 			}
-
 			if foundCrios {
 				//override
 				ua.Family = UAFamily_Chrome
@@ -224,37 +249,20 @@ func NewSBOUserAgent(uaString string) *SBOUserAgent {
 				ua.Human = Human_No
 			}
 		}
-
 	}
-
-	//slog.Debug("SBOUserAgent", "ua", ua)
 	return &ua
+
 }
 
 func processCompatiblePart(ua *SBOUserAgent, compatiblePart string) {
-	if strings.Contains(compatiblePart, "Googlebot") {
-		ua.DeviceType = DeviceType_Script
-		ua.Human = Human_No
-		ua.Family = UAFamily_SearchBot
-	} else if strings.Contains(compatiblePart, "yandex") {
-		ua.DeviceType = DeviceType_Script
-		ua.Human = Human_No
-		ua.Family = UAFamily_SearchBot
-	} else if strings.Contains(compatiblePart, "bingbot") {
-		ua.DeviceType = DeviceType_Script
-		ua.Human = Human_No
-		ua.Family = UAFamily_SearchBot
-	} else if strings.Contains(compatiblePart, "ahrefs") {
+	lowerCompatiblePart := strings.ToLower(compatiblePart)
+	if strings.Contains(lowerCompatiblePart, "bot") {
 		ua.DeviceType = DeviceType_Script
 		ua.Human = Human_No
 		ua.Family = UAFamily_OtherBot
-	} else if strings.Contains(compatiblePart, "Bytespider") {
-		ua.Family = UAFamily_OtherBot
-		ua.DeviceType = DeviceType_Script
-		ua.Human = Human_No
-	} else if strings.Contains(compatiblePart, "bot") {
-		ua.DeviceType = DeviceType_Script
-		ua.Human = Human_No
-		ua.Family = UAFamily_OtherBot
+		if strings.Contains(lowerCompatiblePart, "blex") {
+			ua.DeviceType = UAFamily_SEOBot
+			ua.Intent = RequestIntent_Processing
+		}
 	}
 }

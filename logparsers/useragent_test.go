@@ -388,8 +388,8 @@ func TestParseUserAgentAhrefs(t *testing.T) {
 		t.Errorf("Expected DeviceType_Script but got %v", ua.DeviceType)
 	}
 
-	if ua.Family != UAFamily_OtherBot {
-		t.Errorf("Expected UAFamily_OtherBot but got %v", ua.Family)
+	if ua.Family != UAFamily_SEOBot {
+		t.Errorf("Expected UAFamily_SEOBot but got %v", ua.Family)
 	}
 	if ua.Human != Human_No {
 		t.Errorf("Expected Human_No but got %v", ua.Human)
@@ -413,8 +413,8 @@ func TestParseUserAgentBytespider(t *testing.T) {
 		t.Errorf("Expected DeviceType_Script but got %v", ua.DeviceType)
 	}
 
-	if ua.Family != UAFamily_OtherBot {
-		t.Errorf("Expected UAFamily_OtherBot but got %v", ua.Family)
+	if ua.Family != UAFamily_SocialBot {
+		t.Errorf("Expected UAFamily_SocialBot but got %v", ua.Family)
 	}
 	if ua.Human != Human_No {
 		t.Errorf("Expected Human_No but got %v", ua.Human)
@@ -438,8 +438,8 @@ func TestParseUserAgentBytespider2(t *testing.T) {
 		t.Errorf("Expected DeviceType_Script but got %v", ua.DeviceType)
 	}
 
-	if ua.Family != UAFamily_OtherBot {
-		t.Errorf("Expected UAFamily_OtherBot but got %v", ua.Family)
+	if ua.Family != UAFamily_SocialBot {
+		t.Errorf("Expected UAFamily_SocialBot but got %v", ua.Family)
 	}
 	if ua.Human != Human_No {
 		t.Errorf("Expected Human_No but got %v", ua.Human)
@@ -488,8 +488,8 @@ func TestParseUserAgentFacebook(t *testing.T) {
 		t.Errorf("Expected DeviceType_Script but got %v", ua.DeviceType)
 	}
 
-	if ua.Family != UAFamily_OtherBot {
-		t.Errorf("Expected UAFamily_OtherBot but got %v", ua.Family)
+	if ua.Family != UAFamily_SocialBot {
+		t.Errorf("Expected UAFamily_SocialBot but got %v", ua.Family)
 	}
 	if ua.Human != Human_No {
 		t.Errorf("Expected Human_No but got %v", ua.Human)
@@ -547,6 +547,93 @@ func TestParseUserAgentFacebookAI(t *testing.T) {
 
 	if ua.OS != OSFamily_Other {
 		t.Errorf("Expected OSFamily_Other but got %v", ua.OS)
+	}
+
+	if ua.FullName != uaString {
+		t.Errorf("FullName not set")
+	}
+}
+
+func TestParseUserAgentZgrab(t *testing.T) {
+	uaString := `Mozilla/5.0 zgrab/0.x`
+
+	ua := NewSBOUserAgent(uaString)
+	fmt.Printf("DeviceType: %v Family:%v Human:%v OS:%v \n", ua.DeviceType, ua.Family, ua.Human, ua.OS)
+	if ua.DeviceType != DeviceType_Script {
+		t.Errorf("Expected DeviceType_Script but got %v", ua.DeviceType)
+	}
+
+	if ua.Family != UAFamily_Scanner {
+		t.Errorf("Expected UAFamily_Scanner but got %v", ua.Family)
+	}
+	if ua.Human != Human_No {
+		t.Errorf("Expected Human_No but got %v", ua.Human)
+	}
+
+	if ua.OS != OSFamily_Other {
+		t.Errorf("Expected OSFamily_Other but got %v", ua.OS)
+	}
+
+	if ua.Intent != RequestIntent_Scanning {
+		t.Errorf("Expected RequestIntent_Scanning but got %v", ua.OS)
+	}
+
+	if ua.FullName != uaString {
+		t.Errorf("FullName not set")
+	}
+}
+
+func TestParseUserAgentExpanse(t *testing.T) {
+	uaString := `Expanse, a Palo Alto Networks company, searches across the global IPv4 space multiple times per day to identify customers&#39; presences on the Internet. If you would like to be excluded from our scans, please send IP addresses/domains to: scaninfo@paloaltonetworks.com`
+
+	ua := NewSBOUserAgent(uaString)
+	fmt.Printf("DeviceType: %v Family:%v Human:%v OS:%v \n", ua.DeviceType, ua.Family, ua.Human, ua.OS)
+	if ua.DeviceType != DeviceType_Script {
+		t.Errorf("Expected DeviceType_Script but got %v", ua.DeviceType)
+	}
+
+	if ua.Family != UAFamily_Scanner {
+		t.Errorf("Expected UAFamily_Scanner but got %v", ua.Family)
+	}
+	if ua.Human != Human_No {
+		t.Errorf("Expected Human_No but got %v", ua.Human)
+	}
+
+	if ua.OS != OSFamily_Other {
+		t.Errorf("Expected OSFamily_Other but got %v", ua.OS)
+	}
+
+	if ua.Intent != RequestIntent_Scanning {
+		t.Errorf("Expected RequestIntent_Scanning but got %v", ua.OS)
+	}
+
+	if ua.FullName != uaString {
+		t.Errorf("FullName not set")
+	}
+}
+
+func TestParseUserAgentAmazonbot(t *testing.T) {
+	uaString := `Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; Amazonbot/0.1; +https://developer.amazon.com/support/amazonbot) Chrome/119.0.6045.214 Safari/537.36`
+
+	ua := NewSBOUserAgent(uaString)
+	fmt.Printf("DeviceType: %v Family:%v Human:%v OS:%v \n", ua.DeviceType, ua.Family, ua.Human, ua.OS)
+	if ua.DeviceType != DeviceType_Script {
+		t.Errorf("Expected DeviceType_Script but got %v", ua.DeviceType)
+	}
+
+	if ua.Family != UAFamily_AIBot {
+		t.Errorf("Expected UAFamily_AIBot but got %v", ua.Family)
+	}
+	if ua.Human != Human_No {
+		t.Errorf("Expected Human_No but got %v", ua.Human)
+	}
+
+	if ua.OS != OSFamily_Other {
+		t.Errorf("Expected OSFamily_Other but got %v", ua.OS)
+	}
+
+	if ua.Intent != RequestIntent_Processing {
+		t.Errorf("Expected RequestIntent_Scanning but got %v", ua.OS)
 	}
 
 	if ua.FullName != uaString {
