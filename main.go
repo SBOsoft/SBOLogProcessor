@@ -34,18 +34,24 @@ const (
 
 var globalConfig map[string]ConfigForAMonitoredFile = make(map[string]ConfigForAMonitoredFile)
 var globalActiveProfile string = SBO_GLOBAL_PROFILE_METRICS
+var globalActiveLogLevel slog.Level = slog.LevelInfo
 
 func main() {
 	if len(os.Args) < 2 {
 		log.Fatal("Please provide a file path as argument")
 	}
 
-	var logFile *os.File = configureLogging(slog.LevelDebug)
+	parseCommandArgs()
+
+	var logFile *os.File = configureLogging(globalActiveLogLevel)
 	if logFile != nil {
 		defer logFile.Close()
 	}
 
-	parseCommandArgs()
+	slog.Info("Starting app with configuration:")
+	for fp, cfg := range globalConfig {
+		slog.Info("File", "filePath", fp, "configuration", cfg)
+	}
 
 	var wg sync.WaitGroup
 
@@ -58,7 +64,11 @@ func main() {
 
 }
 
+/*
+This function will run before logging is set up. Don't use slog here yet
+*/
 func parseCommandArgs() {
+	logLevelPtr := flag.String("l", "info", "Log level. Defaults to info. Supported values are: debug, info, warn.")
 	profilePtr := flag.String("p", "metrics", "Active profile. Defaults to metrics which will create metrics. Available options are: metrics, count, security. Where count will output total stats from the given file and security will output malicious IPs and security stats.")
 	confFilePtr := flag.String("c", "", "Configuration file in json format. There is no default value but you will want to pass a config file when -m=metrics. ")
 
@@ -86,6 +96,15 @@ func parseCommandArgs() {
 		fmt.Println("For example: ./sbologp -f -p=count /var/log/apache/access.log OR ./sbologp -c sbologp-config.json")
 		flag.PrintDefaults()
 		os.Exit(0)
+	}
+
+	switch *logLevelPtr {
+	case "info":
+		globalActiveLogLevel = slog.LevelInfo
+	case "warn":
+		globalActiveLogLevel = slog.LevelWarn
+	case "debug":
+		globalActiveLogLevel = slog.LevelDebug
 	}
 
 	globalActiveProfile = *profilePtr
@@ -149,8 +168,6 @@ func parseCommandArgs() {
 		}
 
 	}
-
-	slog.Info("Starting app with configuration", "config", globalConfig)
 }
 
 func loadConfigFromFile(configFileName string) bool {
@@ -642,6 +659,16 @@ type ConfigForAMonitoredFile struct {
 	CounterTopNForKeyedMetrics int
 	//when following, interval for updating stats/output
 	CounterOutputIntervalSeconds int
+}
+
+/*
+Don't log db password (note logging globalConfig directly won't call this method and will log the password)
+*/
+func (sd ConfigForAMonitoredFile) LogValue() slog.Value {
+	copySd := sd
+	copySd.DbPassword = "--REDACTED--"
+	logBytes, _ := json.Marshal(copySd)
+	return slog.StringValue(string(logBytes[:]))
 }
 
 // ///////////////handlers
