@@ -38,7 +38,7 @@ func (cv *CounterValue) NextWindow(value int64) {
 
 type CounterHandler struct {
 	filePath              string
-	HandledEntryCounter   int
+	HandledEntryCounter   *CounterValue
 	TotalRequests         *CounterValue
 	TotalBytesSent        *CounterValue
 	RequestsFromNonHumans *CounterValue
@@ -57,6 +57,7 @@ type CounterHandler struct {
 
 	dataToBeSavedChannel chan *metrics.SBOMetricWindowDataToBeSaved
 
+	isFollowing    bool
 	ticker         *time.Ticker
 	tickerStopped  chan (bool)
 	syncMutex      sync.Mutex
@@ -67,6 +68,7 @@ func NewCounterHandler(filePath string) *CounterHandler {
 
 	var rv = CounterHandler{
 		filePath:              filePath,
+		HandledEntryCounter:   &CounterValue{CurrentValue: 0, PreviousValue: 0},
 		TotalRequests:         &CounterValue{CurrentValue: 0, PreviousValue: 0},
 		TotalBytesSent:        &CounterValue{CurrentValue: 0, PreviousValue: 0},
 		RequestsFromNonHumans: &CounterValue{CurrentValue: 0, PreviousValue: 0},
@@ -96,6 +98,7 @@ func (handler *CounterHandler) Begin(dataToSaveChan chan *metrics.SBOMetricWindo
 	handler.dataToBeSavedChannel = dataToSaveChan
 	handler.topNWindowSize = topNSize
 	if following {
+		handler.isFollowing = true
 		slog.Debug("CounterHandler.Begin following is true, starting ticker")
 		time.AfterFunc(time.Duration(2)*time.Second, func() {
 			//Print initial output, just to give the user something without waiting for the whole window duration
@@ -117,7 +120,11 @@ func (handler *CounterHandler) HandleEntry(parsedLogEntry *logparsers.SBOHttpReq
 	handler.syncMutex.Lock()
 	defer handler.syncMutex.Unlock()
 
-	handler.HandledEntryCounter++
+	if handler.HandledEntryCounter == nil {
+		handler.HandledEntryCounter = &CounterValue{CurrentValue: 1}
+	} else {
+		handler.HandledEntryCounter.Increment(1)
+	}
 	if handler.Clients[parsedLogEntry.ClientIP] == nil {
 		handler.Clients[parsedLogEntry.ClientIP] = &CounterValue{CurrentValue: 1}
 	} else {
@@ -245,6 +252,7 @@ func (handler *CounterHandler) startNewWindow() {
 	handler.ResetCountersInMapForNewWindow(handler.UserAgentOSFamilies)
 	handler.ResetCountersInMapForNewWindow(handler.Referers)
 	handler.ResetCountersInMapForNewWindow(handler.RequestedPaths)
+	handler.ResetCountersInMapForNewWindow(handler.RequestIntents)
 }
 
 func (handler *CounterHandler) ResetCountersInMapForNewWindow(theMap map[string]*CounterValue) {
@@ -299,22 +307,49 @@ outOf2Loops:
 func (handler *CounterHandler) PrintCounterData(fromTicker bool) {
 	fmt.Printf("---------%v---------", time.Now().UTC().Format(time.RFC3339))
 	fmt.Println()
-	fmt.Printf("Total log lines   : %v", handler.HandledEntryCounter)
+	if handler.isFollowing {
+		fmt.Printf("Total log lines   : %v (%+d)", handler.HandledEntryCounter.CurrentValue, handler.HandledEntryCounter.CurrentValue-handler.HandledEntryCounter.PreviousValue)
+	} else {
+		fmt.Printf("Total log lines   : %v", handler.HandledEntryCounter.CurrentValue)
+	}
+
 	fmt.Println()
-	fmt.Printf("Total bytes sent  : %v (%v)", handler.TotalBytesSent.CurrentValue, handler.TotalBytesSent.CurrentValue-handler.TotalBytesSent.PreviousValue)
+	if handler.isFollowing {
+		fmt.Printf("Total requests    : %v (%+d)", handler.TotalRequests.CurrentValue, handler.TotalRequests.CurrentValue-handler.TotalRequests.PreviousValue)
+	} else {
+		fmt.Printf("Total requests    : %v", handler.TotalRequests.CurrentValue)
+	}
+
 	fmt.Println()
-	fmt.Printf("Total requests    : %v (%v)", handler.TotalRequests.CurrentValue, handler.TotalRequests.CurrentValue-handler.TotalRequests.PreviousValue)
+	if handler.isFollowing {
+		fmt.Printf("Total bytes sent  : %v (%+d)", handler.TotalBytesSent.CurrentValue, handler.TotalBytesSent.CurrentValue-handler.TotalBytesSent.PreviousValue)
+	} else {
+		fmt.Printf("Total bytes sent  : %v", handler.TotalBytesSent.CurrentValue)
+	}
+
 	fmt.Println()
 	if handler.RequestsFromHumans != nil {
-		fmt.Printf("Requests by humans: %v (%v)", handler.RequestsFromHumans.CurrentValue, handler.RequestsFromHumans.CurrentValue-handler.RequestsFromHumans.PreviousValue)
+		if handler.isFollowing {
+			fmt.Printf("Requests by humans: %v (%+d)", handler.RequestsFromHumans.CurrentValue, handler.RequestsFromHumans.CurrentValue-handler.RequestsFromHumans.PreviousValue)
+		} else {
+			fmt.Printf("Requests by humans: %v", handler.RequestsFromHumans.CurrentValue)
+		}
 		fmt.Println()
 	}
 	if handler.RequestsFromNonHumans != nil {
-		fmt.Printf("Non-human requests: %v (%v)", handler.RequestsFromNonHumans.CurrentValue, handler.RequestsFromNonHumans.CurrentValue-handler.RequestsFromNonHumans.PreviousValue)
+		if handler.isFollowing {
+			fmt.Printf("Non-human requests: %v (%+d)", handler.RequestsFromNonHumans.CurrentValue, handler.RequestsFromNonHumans.CurrentValue-handler.RequestsFromNonHumans.PreviousValue)
+		} else {
+			fmt.Printf("Non-human requests: %v", handler.RequestsFromNonHumans.CurrentValue)
+		}
 		fmt.Println()
 	}
 	if handler.MaliciousRequests != nil {
-		fmt.Printf("Malicious requests: %v (%v)", handler.MaliciousRequests.CurrentValue, handler.MaliciousRequests.CurrentValue-handler.MaliciousRequests.PreviousValue)
+		if handler.isFollowing {
+			fmt.Printf("Malicious requests: %v (%+d)", handler.MaliciousRequests.CurrentValue, handler.MaliciousRequests.CurrentValue-handler.MaliciousRequests.PreviousValue)
+		} else {
+			fmt.Printf("Malicious requests: %v", handler.MaliciousRequests.CurrentValue)
+		}
 		fmt.Println()
 	}
 	handler.printMapValue("Intents           :", handler.RequestIntents)
@@ -377,7 +412,11 @@ func (handler *CounterHandler) printMapValue(header string, m map[string]*Counte
 		if len(keyValueToPrint) < 1 {
 			keyValueToPrint = "-not set-"
 		}
-		fmt.Printf("%s %-*v:%6v (%+d)", linePrefix, maxLabelLen+1, keyValueToPrint, mapEntry.value.CurrentValue, mapEntry.value.CurrentValue-mapEntry.value.PreviousValue)
+		if handler.isFollowing {
+			fmt.Printf("%s %-*v:%6v (%+d)", linePrefix, maxLabelLen+1, keyValueToPrint, mapEntry.value.CurrentValue, mapEntry.value.CurrentValue-mapEntry.value.PreviousValue)
+		} else {
+			fmt.Printf("%s %-*v:%6v", linePrefix, maxLabelLen+1, keyValueToPrint, mapEntry.value.CurrentValue)
+		}
 		fmt.Println()
 		if i == 0 {
 			linePrefix = indent
