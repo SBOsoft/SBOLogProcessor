@@ -53,6 +53,7 @@ type CounterHandler struct {
 	DeviceTypes         map[string]*CounterValue
 	Referers            map[string]*CounterValue
 	RequestedPaths      map[string]*CounterValue
+	RequestIntents      map[string]*CounterValue
 
 	dataToBeSavedChannel chan *metrics.SBOMetricWindowDataToBeSaved
 
@@ -78,7 +79,8 @@ func NewCounterHandler(filePath string) *CounterHandler {
 		UserAgentOSFamilies:   make(map[string]*CounterValue),
 		DeviceTypes:           make(map[string]*CounterValue),
 		Referers:              make(map[string]*CounterValue),
-		RequestedPaths:        make(map[string]*CounterValue)}
+		RequestedPaths:        make(map[string]*CounterValue),
+		RequestIntents:        make(map[string]*CounterValue)}
 
 	return &rv
 }
@@ -125,6 +127,11 @@ func (handler *CounterHandler) HandleEntry(parsedLogEntry *logparsers.SBOHttpReq
 		handler.DeviceTypes[parsedLogEntry.UserAgent.DeviceType] = &CounterValue{CurrentValue: 1}
 	} else {
 		handler.DeviceTypes[parsedLogEntry.UserAgent.DeviceType].Increment(1)
+	}
+	if handler.RequestIntents[parsedLogEntry.UserAgent.Intent] == nil {
+		handler.RequestIntents[parsedLogEntry.UserAgent.Intent] = &CounterValue{CurrentValue: 1}
+	} else {
+		handler.RequestIntents[parsedLogEntry.UserAgent.Intent].Increment(1)
 	}
 	if handler.Methods[parsedLogEntry.Method] == nil {
 		handler.Methods[parsedLogEntry.Method] = &CounterValue{CurrentValue: 1}
@@ -310,6 +317,7 @@ func (handler *CounterHandler) PrintCounterData(fromTicker bool) {
 		fmt.Printf("Malicious requests: %v (%v)", handler.MaliciousRequests.CurrentValue, handler.MaliciousRequests.CurrentValue-handler.MaliciousRequests.PreviousValue)
 		fmt.Println()
 	}
+	handler.printMapValue("Intents           :", handler.RequestIntents)
 
 	handler.printMapValue("Status codes      :", handler.StatusCodes)
 
@@ -369,7 +377,7 @@ func (handler *CounterHandler) printMapValue(header string, m map[string]*Counte
 		if len(keyValueToPrint) < 1 {
 			keyValueToPrint = "-not set-"
 		}
-		fmt.Printf("%s %-*v:%6v (%v)", linePrefix, maxLabelLen+1, keyValueToPrint, mapEntry.value.CurrentValue, mapEntry.value.CurrentValue-mapEntry.value.PreviousValue)
+		fmt.Printf("%s %-*v:%6v (%+d)", linePrefix, maxLabelLen+1, keyValueToPrint, mapEntry.value.CurrentValue, mapEntry.value.CurrentValue-mapEntry.value.PreviousValue)
 		fmt.Println()
 		if i == 0 {
 			linePrefix = indent
