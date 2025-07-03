@@ -73,7 +73,7 @@ const (
 	DeviceType_Script  string = "Script"
 
 	Human_Yes     string = "Human"
-	Human_No      string = "Not Human"
+	Human_No      string = "NonHuman"
 	Human_Unknown string = "Unknown"
 
 	RequestIntent_Unknown    string = "Unknown"
@@ -87,11 +87,11 @@ var reSearchBots *regexp.Regexp = regexp.MustCompile(`(googlebot|bingbot|baidusp
 
 var reSocialBots *regexp.Regexp = regexp.MustCompile(`(facebookexternalhit|twitterbot|linkedinbot|pinterestbot|slackbot|bytespider)`)
 
-var reMarketingBots *regexp.Regexp = regexp.MustCompile(`(ahrefsbot|semrushbot|dotbot|mj12bot|seobilitybot|siteauditbot)`)
+var reMarketingBots *regexp.Regexp = regexp.MustCompile(`(ahrefs|semrush|dotbot|mj12bot|seobilitybot|siteauditbot|yandex.)`)
 
 var reAIBots *regexp.Regexp = regexp.MustCompile(`(gptbot|chatgpt|google-extended|claudebot|meta-externalagent|amazonbot|perplexitybot|youbot)`)
 
-var reScannerBots *regexp.Regexp = regexp.MustCompile(`(censysinspect|expanse|aliyunsecbot|nmap|masscan|zgrab|shodanbot|urlscan)`)
+var reScannerBots *regexp.Regexp = regexp.MustCompile(`(censysinspect|expanse|aliyunsecbot|nmap|masscan|zgrab|shodanbot|urlscan|tchelebi)`)
 
 var reScriptAgents *regexp.Regexp = regexp.MustCompile(`(curl|scrapy|wget|python|go-http-client|java|ruby|okhttp|postman|axios|guzzlehttp|headlesschrome|phantomjs|cloudflare-traffic-manager)`)
 

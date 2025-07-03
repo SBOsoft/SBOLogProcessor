@@ -26,7 +26,10 @@ type SBOHttpRequestLog struct {
 	RemoteUser    string
 	Timestamp     time.Time
 	Method        string
-	Path          string
+	Path          string //full path
+	Path1         string //first part of the path, e.g /a in /a/b/c/d/e.html
+	Path2         string //first and second part of the path, e.g /a/b in /a/b/c/d/e.html
+	Path3         string //first, second and third part of the path, e.g /a/b/c in /a/b/c/d/e.html
 	Protocol      string
 	Status        string
 	BytesSent     int
@@ -69,6 +72,23 @@ func (sbol *SBOHttpRequestLog) SBOHttpRequestLogSetPath(requestUri string) {
 	}
 
 	sbol.Path = parsedurl.Path
+
+	if len(sbol.Path) > 0 {
+		splitPath := strings.Split(sbol.Path, "/")
+		//splitPath[0] is empty, leading / leads to an empty element ?
+		if len(splitPath) == 1 {
+			sbol.Path1 = "/"
+		}
+		if len(splitPath) > 1 {
+			sbol.Path1 = "/" + splitPath[1]
+		}
+		if len(splitPath) > 2 {
+			sbol.Path2 = sbol.Path1 + "/" + splitPath[2]
+		}
+		if len(splitPath) > 3 {
+			sbol.Path3 = sbol.Path2 + "/" + splitPath[3]
+		}
+	}
 
 	if isDirectoryTraversal(parsedurl.Path, requestUri) {
 		sbol.Malicious = REQUEST_MALICIOUS_TRAVERSAL

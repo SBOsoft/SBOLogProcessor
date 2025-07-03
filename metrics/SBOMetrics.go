@@ -8,11 +8,6 @@ import (
 	"time"
 )
 
-/*
-Keep the most recent 5 time windows
-*/
-const SBO_METRIC_VALUES_WINDOW_SIZE int = 5
-
 var nonNumericRegex = regexp.MustCompile(`[^0-9]+`)
 
 type SBOMetricMap map[int]map[string]*SBOMetric
@@ -20,6 +15,7 @@ type SBOMetricMap map[int]map[string]*SBOMetric
 type SBOMetricsManager struct {
 	allMetrics            map[string]SBOMetricMap
 	timeWindowTrackingMap map[string][]int64
+	windowSize            int
 }
 
 const SBO_METRIC_REQ_COUNT int = 1
@@ -28,11 +24,13 @@ const SBO_METRIC_HTTP_STATUS int = 3
 const SBO_METRIC_CLIENT_IP int = 4
 const SBO_METRIC_METHOD int = 5
 const SBO_METRIC_REFERER int = 6
+const SBO_METRIC_PATH int = 7
 
 const SBO_METRIC_UA_FAMILY int = 11
 const SBO_METRIC_OS_FAMILY int = 12
 const SBO_METRIC_DEVICE_TYPE int = 13
 const SBO_METRIC_IS_HUMAN int = 14
+const SBO_METRIC_REQUEST_INTENT int = 15
 
 type SBOMetric struct {
 	//for keeping track of keys in sorted order
@@ -60,14 +58,15 @@ func NewSBOMetricWindowDataToBeSaved(filePath string, metricType int, keyValue s
 	return &rv
 }
 
-func NewSBOMetricsManager() *SBOMetricsManager {
+func NewSBOMetricsManager(timeWindowSize int) *SBOMetricsManager {
 
 	m := make(map[string]SBOMetricMap)
-	t := make(map[string][]int64, SBO_METRIC_VALUES_WINDOW_SIZE+1)
+	t := make(map[string][]int64, timeWindowSize+1)
 
 	manager := SBOMetricsManager{
 		allMetrics:            m,
-		timeWindowTrackingMap: t}
+		timeWindowTrackingMap: t,
+		windowSize:            timeWindowSize}
 
 	return &manager
 }
@@ -81,8 +80,8 @@ func (manager *SBOMetricsManager) GetAllMetricsForFile(filePath string) SBOMetri
 }
 
 func NewSBOMetric(metricType int, key string, manager *SBOMetricsManager) *SBOMetric {
-	keys := make([]int64, SBO_METRIC_VALUES_WINDOW_SIZE)
-	values := make(map[int64]int64, SBO_METRIC_VALUES_WINDOW_SIZE)
+	keys := make([]int64, manager.windowSize)
+	values := make(map[int64]int64, manager.windowSize)
 	return &SBOMetric{ /* metricType, key, */ keys, values, 0, manager}
 }
 
@@ -143,7 +142,7 @@ func (manager *SBOMetricsManager) ProcessKeyedValueTimeWindowTracking(filePath s
 
 func (manager *SBOMetricsManager) doTimeWindowTracking(filePath string, timeWindow int64) {
 	if manager.timeWindowTrackingMap[filePath] == nil {
-		manager.timeWindowTrackingMap[filePath] = make([]int64, SBO_METRIC_VALUES_WINDOW_SIZE+1)
+		manager.timeWindowTrackingMap[filePath] = make([]int64, manager.windowSize+1)
 	}
 
 	if slices.Contains(manager.timeWindowTrackingMap[filePath], timeWindow) {
@@ -151,7 +150,7 @@ func (manager *SBOMetricsManager) doTimeWindowTracking(filePath string, timeWind
 		return
 	}
 	manager.timeWindowTrackingMap[filePath] = append(manager.timeWindowTrackingMap[filePath], timeWindow)
-	if len(manager.timeWindowTrackingMap[filePath]) >= SBO_METRIC_VALUES_WINDOW_SIZE {
+	if len(manager.timeWindowTrackingMap[filePath]) >= manager.windowSize {
 		slices.Sort(manager.timeWindowTrackingMap[filePath])
 
 		//oldestTimewindow := timeWindowTrackingMap[filePath][0]
@@ -177,7 +176,7 @@ func (sbm *SBOMetric) addValue(filePath string, eventTimestamp time.Time, valueT
 		sbm.keys[0] = timeWindow
 		slices.Sort(sbm.keys)
 		//after this sort, [0] will always be the smallest key value
-		if sbm.keyCounter >= SBO_METRIC_VALUES_WINDOW_SIZE {
+		if sbm.keyCounter >= sbm.manager.windowSize {
 			if sbm.keys[0] == timeWindow {
 				//don't add as the new timeWindow is less than existing items
 				return 0, 0

@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 
 	"github.com/SBOsoft/SBOLogProcessor/logparsers"
 	"github.com/SBOsoft/SBOLogProcessor/metrics"
@@ -61,28 +62,42 @@ func (handler *MetricGeneratorHandler) HandleEntry(parsedLogEntry *logparsers.SB
 	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_BYTES_SENT, "", int64(parsedLogEntry.BytesSent))
 	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_HTTP_STATUS, parsedLogEntry.Status, 1)
 
-	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_CLIENT_IP, parsedLogEntry.ClientIP, 1)
+	//TODO consider adding IPs or not. adding client IPs will create a metric entry for each IP address and would lead to excessive data
+	/*
+		handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_CLIENT_IP, parsedLogEntry.ClientIP, 1)
+		if handler.handledEntryCounter%50 == 0 {
+			handler.metricsManager.CleanUpAllProcessKeyedValueTimeWindowTracking(handler.filePath, metrics.SBO_METRIC_CLIENT_IP, handler.dataToBeSavedChannel)
+		}
+	*/
 
 	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_METHOD, parsedLogEntry.Method, 1)
 
 	if len(parsedLogEntry.Referer) > 0 {
 		handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_REFERER, parsedLogEntry.Referer, 1)
 	}
+
+	//add metrics for the first 3 levels, e.g /a/b/c/d/f/x.html will generate 1 for /a 1 for /a/b and 1 for /a/b/c we don't add the full path as they may be too long and too many
+	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_PATH, parsedLogEntry.Path1, 1)
+	if len(parsedLogEntry.Path2) > 0 {
+		handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_PATH, parsedLogEntry.Path2, 1)
+	}
+	if len(parsedLogEntry.Path3) > 0 {
+		handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_PATH, parsedLogEntry.Path3, 1)
+	}
+
 	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_UA_FAMILY, parsedLogEntry.UserAgent.Family, 1)
 	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_OS_FAMILY, parsedLogEntry.UserAgent.OS, 1)
 	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_DEVICE_TYPE, parsedLogEntry.UserAgent.DeviceType, 1)
 	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_IS_HUMAN, parsedLogEntry.UserAgent.Human, 1)
+	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_REQUEST_INTENT, parsedLogEntry.UserAgent.Intent, 1)
 
-	if handler.handledEntryCounter%50 == 0 {
-		handler.metricsManager.CleanUpAllProcessKeyedValueTimeWindowTracking(handler.filePath, metrics.SBO_METRIC_CLIENT_IP, handler.dataToBeSavedChannel)
-	}
 	return true, nil
 }
 
 func (handler *MetricGeneratorHandler) handleSingleMetric(parsedLogEntry *logparsers.SBOHttpRequestLog, metricType int, keyValue string, valueToAdd int64) {
 	dataToBeSaved := handler.metricsManager.AddMetric(handler.filePath, metricType, keyValue, parsedLogEntry.Timestamp, valueToAdd)
 	if dataToBeSaved != nil {
-		fmt.Printf("Data to save: %v", dataToBeSaved)
+		slog.Debug("Data to be saved", "data", dataToBeSaved)
 		handler.dataToBeSavedChannel <- dataToBeSaved
 	}
 }

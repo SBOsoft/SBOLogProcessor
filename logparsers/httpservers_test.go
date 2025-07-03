@@ -6,14 +6,17 @@ import (
 )
 
 func TestParseApacheCommonLogFormat(t *testing.T) {
-	line := `127.0.0.1 - frank [10/Oct/2000:13:55:36 -0700] "GET /apache_pb.gif HTTP/1.0" 200 2326`
+	line := `127.0.0.1 - frank [10/Oct/2000:13:55:36 -0700] "GET /p1/p2/p3/apache_pb.gif HTTP/1.0" 200 2326`
 	expected := map[string]string{
 		"remote_host":    "127.0.0.1",
 		"remote_logname": "-",
 		"remote_user":    "frank",
 		"timestamp":      "10/Oct/2000:13:55:36 -0700",
 		"method":         "GET",
-		"path":           "/apache_pb.gif",
+		"path":           "/p1/p2/p3/apache_pb.gif",
+		"path1":          "/p1",
+		"path2":          "/p1/p2",
+		"path3":          "/p1/p2/p3",
 		"protocol":       "HTTP/1.0",
 		"status":         "200",
 		"bytes_sent":     "2326",
@@ -26,6 +29,54 @@ func TestParseApacheCommonLogFormat(t *testing.T) {
 
 	if result.ClientIP != expected["remote_host"] {
 		t.Errorf("Expected %s, got %s", expected["remote_host"], result.ClientIP)
+	}
+
+	if result.Path1 != expected["path1"] {
+		t.Errorf("Expected %s, got %s", expected["path1"], result.Path1)
+	}
+	if result.Path2 != expected["path2"] {
+		t.Errorf("Expected %s, got %s", expected["path2"], result.Path2)
+	}
+	if result.Path3 != expected["path3"] {
+		t.Errorf("Expected %s, got %s", expected["path3"], result.Path3)
+	}
+
+}
+
+func TestParseApacheCommonLogFormat2(t *testing.T) {
+	line := `127.0.0.1 - frank [10/Oct/2000:13:55:36 -0700] "GET / HTTP/1.0" 200 2326`
+	expected := map[string]string{
+		"remote_host":    "127.0.0.1",
+		"remote_logname": "-",
+		"remote_user":    "frank",
+		"timestamp":      "10/Oct/2000:13:55:36 -0700",
+		"method":         "GET",
+		"path":           "/",
+		"path1":          "/",
+		"path2":          "",
+		"path3":          "",
+		"protocol":       "HTTP/1.0",
+		"status":         "200",
+		"bytes_sent":     "2326",
+	}
+
+	result, err := ParseApacheCommonLogFormat(line)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	if result.ClientIP != expected["remote_host"] {
+		t.Errorf("Expected %s, got %s", expected["remote_host"], result.ClientIP)
+	}
+
+	if result.Path1 != expected["path1"] {
+		t.Errorf("Expected %s, got %s", expected["path1"], result.Path1)
+	}
+	if result.Path2 != expected["path2"] {
+		t.Errorf("Expected %s, got %s", expected["path2"], result.Path2)
+	}
+	if result.Path3 != expected["path3"] {
+		t.Errorf("Expected %s, got %s", expected["path3"], result.Path3)
 	}
 
 }

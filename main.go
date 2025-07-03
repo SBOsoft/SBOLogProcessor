@@ -158,6 +158,7 @@ func parseCommandArgs() {
 				DbPassword:                   "sboanalyticsrootpw",
 				DbDatabase:                   "sboanalytics",
 				ReplaceExistingMetrics:       true,
+				MetricsWindowSize:            3,
 				CounterTopNForKeyedMetrics:   *counterTopNPtr,
 				CounterOutputIntervalSeconds: *counterOutputIntervalPtr}
 
@@ -198,6 +199,11 @@ func loadConfigFromFile(configFileName string) bool {
 						if conf.CounterTopNForKeyedMetrics < 1 || conf.CounterTopNForKeyedMetrics > 100 {
 							conf.CounterTopNForKeyedMetrics = 10
 						}
+						windowSizeToUse := conf.MetricsWindowSize
+						if conf.MetricsWindowSize < 2 || conf.MetricsWindowSize > 10 {
+							//allow sensible values only
+							windowSizeToUse = 3
+						}
 						globalConfig[fp] = ConfigForAMonitoredFile{
 							Enabled:                      conf.Enabled,
 							FilePath:                     conf.FilePath,
@@ -215,6 +221,7 @@ func loadConfigFromFile(configFileName string) bool {
 							DbPassword:                   conf.DbPassword,
 							DbDatabase:                   conf.DbDatabase,
 							ReplaceExistingMetrics:       conf.ReplaceExistingMetrics,
+							MetricsWindowSize:            windowSizeToUse,
 							CounterTopNForKeyedMetrics:   conf.CounterTopNForKeyedMetrics,
 							CounterOutputIntervalSeconds: conf.CounterOutputIntervalSeconds}
 
@@ -337,7 +344,7 @@ func consumeLinesFromChannel(filePath string, linesChannel chan string, wg *sync
 	var lineResult bool
 
 	//*metrics.SBOMetricsManager
-	metricsManager := metrics.NewSBOMetricsManager()
+	metricsManager := metrics.NewSBOMetricsManager(globalConfig[filePath].MetricsWindowSize)
 
 	for _, handlerName := range globalConfig[filePath].Handlers {
 		globalConfig[filePath].HandlerInstances[handlerName] = createHandler(filePath, handlerName, dataToBeSavedChannel, metricsManager)
@@ -648,6 +655,11 @@ type ConfigForAMonitoredFile struct {
 	DbPassword             string
 	DbDatabase             string
 	ReplaceExistingMetrics bool
+	//Only a limited number of most recent time window values will be kept active and others will be removed out of scope (and saved)
+	// e.g if we encounter logs for 202507021121 and 202507021122 and 202507021123 then we should be able to handle them
+	// e.g if they are somehow unordered, e.g a request takes too long to complete and is logged after subsequent requests
+	// or when timewindow goes out of scope when new time window values are encountered
+	MetricsWindowSize int
 	//number of top N items like IP addresses to be displayed in outputs
 	CounterTopNForKeyedMetrics int
 	//when following, interval for updating stats/output
