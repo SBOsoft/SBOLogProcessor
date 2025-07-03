@@ -219,7 +219,7 @@ func loadConfigFromFile(configFileName string) bool {
 							CounterOutputIntervalSeconds: conf.CounterOutputIntervalSeconds}
 
 					}
-					slog.Info("Loaded config from file", "file", configFileName, "configuration", globalConfig)
+					slog.Debug("Loaded config from file", "file", configFileName)
 				}
 			}
 		}
@@ -288,8 +288,6 @@ func configureLogging(logLevel slog.Level) *os.File {
 		slog.SetDefault(slog.New(logHandler))
 		return logFile
 	}
-	//to disable all logging
-	//slog.SetLogLoggerLevel(math.MaxInt)
 }
 
 /*
@@ -299,13 +297,16 @@ func processMetricDataToBeSaved(filePath string, dataToBeSavedChannel chan *metr
 
 	defer wg.Done()
 	sbodb := db.NewSBOAnalyticsDB()
-	defer sbodb.Close()
-	sbodb.Init(globalConfig[filePath].DbUser, globalConfig[filePath].DbPassword, globalConfig[filePath].DbAddress, globalConfig[filePath].DbDatabase)
+	if globalConfig[filePath].WriteMetricsToDb {
+		//if not writing to db then db stuff is unnecessary
+		defer sbodb.Close()
+		sbodb.Init(globalConfig[filePath].DbUser, globalConfig[filePath].DbPassword, globalConfig[filePath].DbAddress, globalConfig[filePath].DbDatabase)
+	}
 	domainIdsCache := make(map[string]int)
 
 	for dataToSave := range dataToBeSavedChannel {
 		if !globalConfig[filePath].WriteMetricsToDb {
-			//TODO skip this channel and loop and extra calls completely
+			//nothing to do here, just move
 			continue
 		}
 		domainName := globalConfig[filePath].DomainName
@@ -343,15 +344,7 @@ func consumeLinesFromChannel(filePath string, linesChannel chan string, wg *sync
 	}
 
 	defer wg.Done()
-
-	for _, handler := range globalConfig[filePath].Handlers {
-		switch handler {
-		case handlers.WRITE_TO_FILE_HANDLER_NAME:
-
-		case handlers.METRIC_GENERATOR_HANDLER_NAME:
-
-		}
-	}
+	defer close(dataToBeSavedChannel)
 
 	slog.Debug("Start consumer in consumeLinesFromChannel", "filePath", filePath)
 	for line := range linesChannel {
@@ -366,7 +359,7 @@ func consumeLinesFromChannel(filePath string, linesChannel chan string, wg *sync
 	for _, h := range globalConfig[filePath].HandlerInstances {
 		h.End()
 	}
-	defer close(dataToBeSavedChannel)
+
 	slog.Info("consumeLinesFromChannel finished", "processedLineCount", processedLineCount, "errorCount", errorCount)
 
 }
@@ -386,6 +379,7 @@ func processSingleLogLine(filePath string, logLine string,
 			name string
 			fn   func(string) (*logparsers.SBOHttpRequestLog, error)
 		}{
+			//TODO add formats and parsers here
 			{"Apache Common Log Format", logparsers.ParseApacheCommonLogFormat},
 			{"Apache Combined Log Format", logparsers.ParseApacheCombinedLogFormat},
 			//{"Apache VHost Combined Log Format", logparsers.ParseApacheVHostCombinedLogFormat},
@@ -407,7 +401,6 @@ func processSingleLogLine(filePath string, logLine string,
 			//invalid line
 			return false, parserFunction
 		} else {
-			//slog.Debug("Parse success", "parsed", parseResult)
 			//now calculate stats
 			callHandlersForRequestLogEntry(filePath, parseResult, dataToBeSavedChannel)
 			return true, parserFunction
@@ -455,7 +448,7 @@ func produceLinesFromFile(filePath string, lines chan<- string) {
 	var fileReader *bufio.Reader
 	var err error
 	// Initial file open
-	if err, file, fileReader = openFile(false, filePath); err != nil {
+	if file, fileReader, err = openFile(false, filePath); err != nil {
 		slog.Error("Error opening file", "filePath", filePath, "error", err)
 		return
 	}
@@ -482,7 +475,7 @@ func produceLinesFromFile(filePath string, lines chan<- string) {
 			}
 
 		} else {
-			slog.Warn("fileReader is nil", "filePath", filePath)
+			slog.Warn("fileReader is nil in produceLinesFromFile", "filePath", filePath)
 			break
 		}
 
@@ -502,7 +495,7 @@ func produceLinesFromFile(filePath string, lines chan<- string) {
 
 				if event.Has(fsnotify.Write) {
 					// File was modified, continue reading, normal case
-					slog.Info("File was modified after receiving EOF in the previous read. Continue reading", "file", filePath)
+					slog.Debug("File was modified after receiving EOF in the previous read. Continue reading", "file", filePath)
 					waitingForNewData = false
 					continue
 				}
@@ -519,7 +512,7 @@ func produceLinesFromFile(filePath string, lines chan<- string) {
 					waitingForNewData = false
 					// Try to reopen the file
 					for i := 0; i < 5; i++ {
-						if err, file, fileReader = openFile(true, filePath); err == nil {
+						if file, fileReader, err = openFile(true, filePath); err == nil {
 							break
 						}
 						time.Sleep(1 * time.Second)
@@ -547,7 +540,7 @@ func produceLinesFromFile(filePath string, lines chan<- string) {
 	}
 }
 
-func openFile(reopeningAfterRotate bool, filePath string) (error, *os.File, *bufio.Reader) {
+func openFile(reopeningAfterRotate bool, filePath string) (*os.File, *bufio.Reader, error) {
 	var err error
 	var file *os.File
 	var fileReader *bufio.Reader
@@ -558,7 +551,7 @@ func openFile(reopeningAfterRotate bool, filePath string) (error, *os.File, *buf
 
 	if err != nil {
 		slog.Error("Error opening file", "filePath", filePath, "error", err)
-		return err, file, fileReader
+		return file, fileReader, err
 	}
 
 	if reopeningAfterRotate || globalConfig[filePath].StartFrom == START_FROM_BEGINNING {
@@ -567,7 +560,7 @@ func openFile(reopeningAfterRotate bool, filePath string) (error, *os.File, *buf
 		if err != nil {
 			file.Close()
 			slog.Error("Error seeking to beginning of file", "filePath", filePath, "error", err)
-			return err, file, fileReader
+			return file, fileReader, err
 		}
 	} else if globalConfig[filePath].StartFrom == START_FROM_END || globalConfig[filePath].StartFrom < 0 {
 		// Seek to end if file exists
@@ -575,7 +568,7 @@ func openFile(reopeningAfterRotate bool, filePath string) (error, *os.File, *buf
 		if err != nil {
 			file.Close()
 			slog.Error("Error seeking to end of file", "filePath", filePath, "error", err)
-			return err, file, fileReader
+			return file, fileReader, err
 		}
 	} else {
 		//skip until the line
@@ -597,11 +590,11 @@ func openFile(reopeningAfterRotate bool, filePath string) (error, *os.File, *buf
 		fileReader = bufio.NewReaderSize(file, 8192)
 	}
 
-	return nil, file, fileReader
+	return file, fileReader, nil
 }
 
 func readFileToEnd(filePath string, lines chan<- string, fileReader *bufio.Reader) {
-	slog.Debug("Read file to end ", "filePath", filePath)
+	slog.Debug("Reading file to end ", "filePath", filePath)
 	for {
 		if !readSingleLineFromFile(filePath, lines, fileReader) {
 			slog.Debug("Read file to end DONE", "filePath", filePath)
