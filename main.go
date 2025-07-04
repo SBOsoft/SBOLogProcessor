@@ -466,7 +466,7 @@ func produceLinesFromFile(filePath string, lines chan<- string) {
 
 		if fileReader != nil {
 			if !waitingForNewData { //dont even try to read if just waiting
-				isFileAtEnd = readSingleLineFromFile(filePath, lines, fileReader)
+				isFileAtEnd = readSingleLineFromFileReturnTrueIfEOF(filePath, lines, fileReader)
 				if isFileAtEnd && !globalConfig[filePath].Follow {
 					slog.Info("Finished reading the file and not following, so done...")
 					return
@@ -606,14 +606,15 @@ func openFile(reopeningAfterRotate bool, filePath string) (*os.File, *bufio.Read
 func readFileToEnd(filePath string, lines chan<- string, fileReader *bufio.Reader) {
 	slog.Debug("Reading file to end ", "filePath", filePath)
 	for {
-		if !readSingleLineFromFile(filePath, lines, fileReader) {
-			slog.Debug("Read file to end DONE", "filePath", filePath)
+		isEOF := readSingleLineFromFileReturnTrueIfEOF(filePath, lines, fileReader)
+		if isEOF {
+			slog.Debug("readFileToEnd done", "filePath", filePath)
 			return
 		}
 	}
 }
 
-func readSingleLineFromFile(filePath string, lines chan<- string, fileReader *bufio.Reader) bool {
+func readSingleLineFromFileReturnTrueIfEOF(filePath string, lines chan<- string, fileReader *bufio.Reader) bool {
 	bytesRead, err := fileReader.ReadString('\n')
 	if len(bytesRead) > 0 {
 		theLine := strings.TrimSpace(string(bytesRead[:]))
