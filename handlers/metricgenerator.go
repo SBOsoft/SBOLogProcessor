@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/SBOsoft/SBOLogProcessor/logparsers"
 	"github.com/SBOsoft/SBOLogProcessor/metrics"
@@ -76,13 +77,17 @@ func (handler *MetricGeneratorHandler) HandleEntry(parsedLogEntry *logparsers.SB
 		handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_REFERER, parsedLogEntry.Referer, 1)
 	}
 
-	//add metrics for the first 3 levels, e.g /a/b/c/d/f/x.html will generate 1 for /a 1 for /a/b and 1 for /a/b/c we don't add the full path as they may be too long and too many
-	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_PATH, parsedLogEntry.Path1, 1)
-	if len(parsedLogEntry.Path2) > 0 {
-		handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_PATH, parsedLogEntry.Path2, 1)
-	}
-	if len(parsedLogEntry.Path3) > 0 {
-		handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_PATH, parsedLogEntry.Path3, 1)
+	//add metrics for paths that return 2xx only. Ignoring others to save space, e.g scanners sending hundreds of paths
+	if len(parsedLogEntry.Status) > 0 && strings.HasPrefix(parsedLogEntry.Status, "2") {
+		//add metrics for the first 3 levels, e.g /a/b/c/d/f/x.html will generate 1 for /a 1 for /a/b and 1 for /a/b/c
+		// we don't add the full path as they may be too long and too many
+		handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_PATH, parsedLogEntry.Path1, 1)
+		if len(parsedLogEntry.Path2) > 0 {
+			handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_PATH, parsedLogEntry.Path2, 1)
+		}
+		if len(parsedLogEntry.Path3) > 0 {
+			handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_PATH, parsedLogEntry.Path3, 1)
+		}
 	}
 
 	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_UA_FAMILY, parsedLogEntry.UserAgent.Family, 1)

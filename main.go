@@ -475,7 +475,7 @@ func produceLinesFromFile(filePath string, lines chan<- string) {
 					waitingForNewData = true
 					file.Seek(0, 2)
 					fileReader.Reset(file)
-					//slog.Debug("readSingleLineFromFile isFileAtEnd", "isFileAtEnd", isFileAtEnd)
+					slog.Debug("readSingleLineFromFile isFileAtEnd after waitingForNewData was false", "isFileAtEnd", isFileAtEnd)
 				}
 			} else {
 				//slog.Warn("waitingForNewData is true in produceLinesFromFile")
@@ -527,6 +527,8 @@ func produceLinesFromFile(filePath string, lines chan<- string) {
 					if fileReader == nil {
 						slog.Warn("File was renamed/removed (log rotation) but could not be reopened", "file", filePath)
 						return
+					} else {
+						slog.Info("Re-opened file after rotation", "file", filePath)
 					}
 				}
 
@@ -543,7 +545,7 @@ func produceLinesFromFile(filePath string, lines chan<- string) {
 				}
 				continue
 			}
-		}
+		} //if follow
 	}
 }
 
@@ -579,6 +581,7 @@ func openFile(reopeningAfterRotate bool, filePath string) (*os.File, *bufio.Read
 		}
 	} else {
 		//skip until the line
+		slog.Info("Skipping lines after opening file", "skippedLines", globalConfig[filePath].StartFrom)
 		fileReader = bufio.NewReaderSize(file, 8192)
 		lineNo := 1
 		for {
