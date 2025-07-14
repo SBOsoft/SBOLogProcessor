@@ -21,13 +21,8 @@ package metrics
 
 import (
 	"log/slog"
-	"regexp"
 	"slices"
-	"strconv"
-	"time"
 )
-
-var nonNumericRegex = regexp.MustCompile(`[^0-9]+`)
 
 type SBOMetricMap map[int]map[string]*SBOMetric
 
@@ -104,7 +99,7 @@ func NewSBOMetric(metricType int, key string, manager *SBOMetricsManager) *SBOMe
 	return &SBOMetric{ /* metricType, key, */ keys, values, 0, manager}
 }
 
-func (manager *SBOMetricsManager) AddMetric(filePath string, metricType int, keyValue string, eventTimestamp time.Time, valueToAdd int64) *SBOMetricWindowDataToBeSaved {
+func (manager *SBOMetricsManager) AddMetric(filePath string, metricType int, keyValue string, timeWindow int64, valueToAdd int64) *SBOMetricWindowDataToBeSaved {
 	mapForFile, ok := manager.allMetrics[filePath]
 	if !ok {
 		mapForFile = make(map[int]map[string]*SBOMetric)
@@ -121,10 +116,12 @@ func (manager *SBOMetricsManager) AddMetric(filePath string, metricType int, key
 		sbom = NewSBOMetric(metricType, keyValue, manager)
 		keyMap[keyValue] = sbom
 	}
-	timeWindow, metricValue := sbom.addValue(filePath, eventTimestamp, valueToAdd)
+	//note this is a bit weird. addValue returns the timewindow and metric value that is moved out of scope when the new value is added
+	// we have a fixed size window, when a new value is added oldest one is removed and returned by addValue
+	timeWindowToBeSavedAsItMovedOutOfScope, metricValueToBeSaved := sbom.addValue(filePath, timeWindow, valueToAdd)
 
-	if timeWindow > 0 {
-		return NewSBOMetricWindowDataToBeSaved(filePath, metricType, keyValue, timeWindow, metricValue)
+	if timeWindowToBeSavedAsItMovedOutOfScope > 0 {
+		return NewSBOMetricWindowDataToBeSaved(filePath, metricType, keyValue, timeWindowToBeSavedAsItMovedOutOfScope, metricValueToBeSaved)
 	} else {
 		return nil
 	}
@@ -183,13 +180,10 @@ func (manager *SBOMetricsManager) doTimeWindowTracking(filePath string, timeWind
 return timeWindow and the metric value for that timeWindow when the timeWindow is removed out of scope
 the caller may want to save the removed timeWindow and the metric value
 */
-func (sbm *SBOMetric) addValue(filePath string, eventTimestamp time.Time, valueToAdd int64) (int64, int64) {
-	formattedTs := eventTimestamp.Format(time.RFC3339)
-	cleanTs := nonNumericRegex.ReplaceAllString(formattedTs[0:17], "")
-	timeWindow, _ := strconv.ParseInt(cleanTs, 10, 64)
+func (sbm *SBOMetric) addValue(filePath string, timeWindow int64, valueToAdd int64) (int64, int64) {
 	sbm.manager.doTimeWindowTracking(filePath, timeWindow)
-	var rv1 int64 = 0
-	var rv2 int64 = 0
+	var timeWindowToBeSaved int64 = 0
+	var metricValue int64 = 0
 	//	slog.Warn("timeWindow for timestamp", "timestamp", eventTimestamp, "timeWindow", timeWindow, "error", err)
 	if sbm.Values[timeWindow] < 1 {
 		sbm.keys[0] = timeWindow
@@ -197,13 +191,14 @@ func (sbm *SBOMetric) addValue(filePath string, eventTimestamp time.Time, valueT
 		//after this sort, [0] will always be the smallest key value
 		if sbm.keyCounter >= sbm.manager.windowSize {
 			if sbm.keys[0] == timeWindow {
-				//don't add as the new timeWindow is less than existing items
+				//don't add or save as the new timeWindow is less than existing items. e.g we received an old entry unexpectedly
+				//TODO report?
 				return 0, 0
 			} else {
 				//now remove the smallest item which is at keys[0]
-				rv2 = sbm.Values[sbm.keys[0]]
+				metricValue = sbm.Values[sbm.keys[0]]
 				delete(sbm.Values, sbm.keys[0])
-				rv1 = sbm.keys[0]
+				timeWindowToBeSaved = sbm.keys[0]
 			}
 		}
 		sbm.Values[timeWindow] = valueToAdd
@@ -211,5 +206,5 @@ func (sbm *SBOMetric) addValue(filePath string, eventTimestamp time.Time, valueT
 	} else {
 		sbm.Values[timeWindow] = sbm.Values[timeWindow] + valueToAdd
 	}
-	return rv1, rv2
+	return timeWindowToBeSaved, metricValue
 }

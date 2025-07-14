@@ -262,7 +262,7 @@ func createHandler(filePath string, handlerName string, dataToSaveChan chan *met
 		slog.Info("Created WriteToFileHandler", "error", err)
 		return writeToFile
 	case handlerName == handlers.METRIC_GENERATOR_HANDLER_NAME:
-		metricsGenerator := handlers.NewMetricGeneratorHandler(filePath, metricsManager)
+		metricsGenerator := handlers.NewMetricGeneratorHandler(filePath, metricsManager, globalConfig[filePath].TimeWindowSizeMinutes)
 		metricsGenerator.Begin(dataToSaveChan)
 		slog.Info("Created MetricGeneratorHandler")
 		return metricsGenerator
@@ -666,7 +666,8 @@ type ConfigForAMonitoredFile struct {
 	Follow                 bool
 	//if not available in logs
 	DomainName string
-	//used for metrics
+	//used for metrics. Only the following specific values are supported: Other values will be ignored. Defaults to 10
+	// supported values: 1, 5, 10, 15, 30, 60
 	TimeWindowSizeMinutes int
 	//used for logs "re-logged" to a different file. parsed log entries will be written as 1 json entry per line into this file
 	//only used by writetofile.go
