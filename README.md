@@ -3,9 +3,9 @@ Access Log Processor and Metrics Generator
 
 There are 3 main use cases (profiles) supported by this tool:
 
- 1. Counter mode (when -p=count option is provided): Counts logs from an access log file and prints statistics to stdout
- 2. Metrics generator (when -p=metrics option is provided): Processes logs from an access log file (or files) and generates metrics, which can be saved into a mysql database to be used with SBOAnalytics (a web front-end for metrics) or just printed to stdout.
- 3. Security mode (when -p=security option is provided): (Not implemented yet) Processes logs from an access log file and outputs potential security issues (e.g abuser, stats on sql injection attempts etc) giving you a list of IPs and/or patterns that you may want to block
+ 1. Counter mode (when -p=count option is provided): Counts logs from an access log file and prints statistics to stdout every 30 seconds
+ 2. Metrics generator (when -p=metrics option is provided): Processes logs from an access log file (or files) and generates metrics, which can be saved into a mysql database to be used with [SBOanalytics](https://github.com/SBOsoft/SBOanalytics) (a web front-end for metrics) or just printed to stdout.
+ 3. Security mode (when -p=security option is provided): (**Not implemented yet**) Processes logs from an access log file and outputs potential security issues (e.g abuser, stats on sql injection attempts etc) giving you a list of IPs and/or patterns that you may want to block
 
 # Usage 
 
@@ -21,14 +21,33 @@ There are too many options which may not have a corresponding command line param
 See https://github.com/SBOsoft/SBOLogProcessor/tree/main/conf/example-config-file.json for configuration examples.
 Configuration must be a json map, with file paths as keys. 
 
+## Example commands
+Examples assume you are running a linux, e.g ubuntu.
 
-# Build and run
+### Counter mode
+Run in counter mode and follow changes, print stats every 30 seconds:
 
-## Development
+```./sbologp -f -p=count /var/log/apache2/access.log```
 
-Install go first
+Run in counter mode without following changes, print total stats:
 
-### Build
+```./sbologp -p=count /var/log/apache2/access.log```
+
+
+### Metrics 
+
+Run in the background using configuration file:
+
+```nohup ./sbologp -f -c sbologp-config.json &```
+
+nohup will ensure the program continues to run in the background even after your session ends, e.g your ssh connection is disconnected.
+
+
+# Development
+
+Install go first, then clone the project from github.
+
+## Build
 
 Build
 ```go build -o ./output/bin/sbologp```
@@ -36,11 +55,22 @@ Build
 Clean
 ```go clean```
 
-### Run
+## Run using go
 Use `go run . -option1 -option2 path-to-access-log-file`  
 
 For example: 
 ```go run . -f -h=COUNTER -p=count /var/log/apache2/access.log```
+
+
+### Counter mode
+
+Print stats from the given log file every 30 seconds (follow changes).
+
+```go run . -f -p count /var/log/apache2/example.com-access.log```
+
+Print total stats from the given log file.
+
+```go run . -p count /var/log/apache2/example.com-access.log```
 
 ### Run tests
 
