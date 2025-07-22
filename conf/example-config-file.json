@@ -12,6 +12,7 @@
         "SkipIfLineMatchesRegex": null,
         "Follow": false,
         "DomainName": "example.com",
+        "HostId": 1,
         "TimeWindowSizeMinutes": 1,
         "WriteToFileTargetFile": null,
         "WriteMetricsToDb": false,
@@ -21,7 +22,10 @@
         "DbDatabase":"",
         "ReplaceExistingMetrics":false,
         "CounterTopNForKeyedMetrics": 10,
-        "CounterOutputIntervalSeconds": 30
+        "CounterOutputIntervalSeconds": 30,
+        "SaveLogsToDb": true,
+        "SaveLogsToDbMaskIPs": true,
+        "SaveLogsToDbOnlyRelevant": 0        
     },
     "/var/log/apache2/COUNTER-example-access.log": {
         "Enabled": true,
@@ -45,12 +49,16 @@
         "SkipIfLineMatchesRegex": null,
         "Follow": true,
         "DomainName": "example.com",
+        "HostId": 1,
         "TimeWindowSizeMinutes": 1,
         "WriteMetricsToDb": true,
         "DbAddress":"127.0.0.1:3306",
         "DbUser":"amysqluser",
         "DbPassword":"pwdforthemysqluser",
         "DbDatabase":"sboanalytics",
-        "ReplaceExistingMetrics":false
+        "ReplaceExistingMetrics":false,
+        "SaveLogsToDb": true,
+        "SaveLogsToDbMaskIPs": true,
+        "SaveLogsToDbOnlyRelevant": 1
     }
 }

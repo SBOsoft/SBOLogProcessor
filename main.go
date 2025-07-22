@@ -172,10 +172,10 @@ func parseCommandArgs() {
 				HandlerInstances: make(map[string]SBOLogHandlerInterface, 1),
 
 				WriteMetricsToDb:             false,
-				DbAddress:                    "127.0.0.1:23306",
-				DbUser:                       "root",
-				DbPassword:                   "sboanalyticsrootpw",
-				DbDatabase:                   "sboanalytics",
+				DbAddress:                    "",
+				DbUser:                       "",
+				DbPassword:                   "",
+				DbDatabase:                   "",
 				ReplaceExistingMetrics:       true,
 				MetricsWindowSize:            3,
 				CounterTopNForKeyedMetrics:   *counterTopNPtr,
@@ -231,6 +231,7 @@ func loadConfigFromFile(configFileName string) bool {
 							SkipIfLineMatchesRegex:       conf.SkipIfLineMatchesRegex,
 							Follow:                       conf.Follow,
 							DomainName:                   conf.DomainName,
+							HostId:                       conf.HostId,
 							TimeWindowSizeMinutes:        conf.TimeWindowSizeMinutes,
 							WriteToFileTargetFile:        conf.WriteToFileTargetFile,
 							HandlerInstances:             make(map[string]SBOLogHandlerInterface),
@@ -242,7 +243,10 @@ func loadConfigFromFile(configFileName string) bool {
 							ReplaceExistingMetrics:       conf.ReplaceExistingMetrics,
 							MetricsWindowSize:            windowSizeToUse,
 							CounterTopNForKeyedMetrics:   conf.CounterTopNForKeyedMetrics,
-							CounterOutputIntervalSeconds: conf.CounterOutputIntervalSeconds}
+							CounterOutputIntervalSeconds: conf.CounterOutputIntervalSeconds,
+							SaveLogsToDb:                 conf.SaveLogsToDb,
+							SaveLogsToDbMaskIPs:          conf.SaveLogsToDbMaskIPs,
+							SaveLogsToDbOnlyRelevant:     conf.SaveLogsToDbOnlyRelevant}
 
 					}
 					slog.Debug("Loaded config from file", "file", configFileName)
@@ -284,13 +288,21 @@ func processFile(filePath string, wg *sync.WaitGroup) {
 	lines := make(chan string, 10) // Buffered channel to prevent blocking
 	dataToBeSavedChannel := make(chan *metrics.SBOMetricWindowDataToBeSaved, 100)
 
-	wg.Add(1)
-	// Start consumer (producer -> consumer -> save data) consumer generates metrics etc
-	go consumeLinesFromChannel(filePath, lines, wg, dataToBeSavedChannel)
+	sbodb := db.NewSBOAnalyticsDB()
+	if globalConfig[filePath].WriteMetricsToDb || globalConfig[filePath].SaveLogsToDb {
+		//if not writing to db then db stuff is unnecessary
+		defer sbodb.Close()
+		sbodb.Init(globalConfig[filePath].DbUser, globalConfig[filePath].DbPassword, globalConfig[filePath].DbAddress, globalConfig[filePath].DbDatabase)
+	}
 
 	wg.Add(1)
+	// Start consumer (producer -> consumer -> save data) consumer generates metrics etc
+	go consumeLinesFromChannel(filePath, lines, wg, dataToBeSavedChannel, sbodb)
+
+	wg.Add(1)
+
 	// Start goroutine for saving data
-	go processMetricDataToBeSaved(filePath, dataToBeSavedChannel, wg)
+	go processMetricDataToBeSaved(filePath, dataToBeSavedChannel, wg, sbodb)
 
 	// Start producer
 	produceLinesFromFile(filePath, lines)
@@ -319,15 +331,9 @@ func configureLogging(logLevel slog.Level) *os.File {
 /*
 Save metric data
 */
-func processMetricDataToBeSaved(filePath string, dataToBeSavedChannel chan *metrics.SBOMetricWindowDataToBeSaved, wg *sync.WaitGroup) {
+func processMetricDataToBeSaved(filePath string, dataToBeSavedChannel chan *metrics.SBOMetricWindowDataToBeSaved, wg *sync.WaitGroup, sbodb *db.SBOAnalyticsDB) {
 
 	defer wg.Done()
-	sbodb := db.NewSBOAnalyticsDB()
-	if globalConfig[filePath].WriteMetricsToDb {
-		//if not writing to db then db stuff is unnecessary
-		defer sbodb.Close()
-		sbodb.Init(globalConfig[filePath].DbUser, globalConfig[filePath].DbPassword, globalConfig[filePath].DbAddress, globalConfig[filePath].DbDatabase)
-	}
 	domainIdsCache := make(map[string]int)
 
 	for dataToSave := range dataToBeSavedChannel {
@@ -357,7 +363,7 @@ func processMetricDataToBeSaved(filePath string, dataToBeSavedChannel chan *metr
 	slog.Debug("processMetricDataToBeSaved done")
 }
 
-func consumeLinesFromChannel(filePath string, linesChannel chan string, wg *sync.WaitGroup, dataToBeSavedChannel chan *metrics.SBOMetricWindowDataToBeSaved) {
+func consumeLinesFromChannel(filePath string, linesChannel chan string, wg *sync.WaitGroup, dataToBeSavedChannel chan *metrics.SBOMetricWindowDataToBeSaved, sbodb *db.SBOAnalyticsDB) {
 	var processedLineCount, errorCount int
 	var parserFunction func(string) (*logparsers.SBOHttpRequestLog, error) = nil
 	var lineResult bool
@@ -374,7 +380,7 @@ func consumeLinesFromChannel(filePath string, linesChannel chan string, wg *sync
 
 	slog.Debug("Start consumer in consumeLinesFromChannel", "filePath", filePath)
 	for line := range linesChannel {
-		lineResult, parserFunction = processSingleLogLine(filePath, line, parserFunction, dataToBeSavedChannel)
+		lineResult, parserFunction = processSingleLogLine(filePath, line, parserFunction, dataToBeSavedChannel, sbodb)
 		if lineResult {
 			processedLineCount++
 		} else {
@@ -392,7 +398,8 @@ func consumeLinesFromChannel(filePath string, linesChannel chan string, wg *sync
 
 func processSingleLogLine(filePath string, logLine string,
 	parserFunction func(string) (*logparsers.SBOHttpRequestLog, error),
-	dataToBeSavedChannel chan *metrics.SBOMetricWindowDataToBeSaved) (bool, func(string) (*logparsers.SBOHttpRequestLog, error)) {
+	dataToBeSavedChannel chan *metrics.SBOMetricWindowDataToBeSaved,
+	sbodb *db.SBOAnalyticsDB) (bool, func(string) (*logparsers.SBOHttpRequestLog, error)) {
 	if len(logLine) < 1 {
 		return false, parserFunction
 	}
@@ -429,8 +436,33 @@ func processSingleLogLine(filePath string, logLine string,
 			//invalid line
 			return false, parserFunction
 		} else {
-			//now calculate stats
+			//now calculate stats or do whatever needs to be done
 			callHandlersForRequestLogEntry(filePath, parseResult, dataToBeSavedChannel)
+			//save log to db
+			if globalConfig[filePath].SaveLogsToDb && sbodb != nil && sbodb.IsInitialized {
+				var domainId int = 0
+				if len(parseResult.Domain) > 0 {
+					domainId, _ = sbodb.GetDomainId(parseResult.Domain)
+				} else {
+					domainId, _ = sbodb.GetDomainId(globalConfig[filePath].DomainName)
+				}
+				if globalConfig[filePath].SaveLogsToDbOnlyRelevant == 1 {
+					//save only if not irrelevant
+					if (parseResult.Malicious == logparsers.REQUEST_MALICIOUS_UNKNOWN) &&
+						(strings.HasPrefix(parseResult.Status, "2") || strings.HasPrefix(parseResult.Status, "5")) &&
+						parseResult.UserAgent.DeviceType != logparsers.DeviceType_Script &&
+						(parseResult.UserAgent.Family != logparsers.UAFamily_Scanner &&
+							parseResult.UserAgent.Family != logparsers.UAFamily_SEOBot &&
+							//parseResult.UserAgent.Family != logparsers.UAFamily_SocialBot &&
+							//parseResult.UserAgent.Family != logparsers.UAFamily_SearchBot &&
+							parseResult.UserAgent.Family != logparsers.UAFamily_Script) {
+						sbodb.SaveRawLog(parseResult, domainId, globalConfig[filePath].HostId, globalConfig[filePath].SaveLogsToDbMaskIPs)
+					}
+				} else {
+					sbodb.SaveRawLog(parseResult, domainId, globalConfig[filePath].HostId, globalConfig[filePath].SaveLogsToDbMaskIPs)
+				}
+
+			}
 			return true, parserFunction
 		}
 
@@ -668,6 +700,8 @@ type ConfigForAMonitoredFile struct {
 	Follow                 bool
 	//if not available in logs
 	DomainName string
+	//Unique host id, must be configured by the user
+	HostId int
 	//used for metrics. Only the following specific values are supported: Other values will be ignored. Defaults to 10
 	// supported values: 1, 5, 10, 15, 30, 60
 	TimeWindowSizeMinutes int
@@ -690,6 +724,12 @@ type ConfigForAMonitoredFile struct {
 	CounterTopNForKeyedMetrics int
 	//when following, interval for updating stats/output
 	CounterOutputIntervalSeconds int
+	//when true logs will be saved in to
+	SaveLogsToDb        bool
+	SaveLogsToDbMaskIPs bool
+	//when 1 requests from bots, scanners, 30x, 40x etc will be skipped.
+	//other values MAY be added in the future so for now treat it as an enum which supports only 0 and 1
+	SaveLogsToDbOnlyRelevant int
 }
 
 /*

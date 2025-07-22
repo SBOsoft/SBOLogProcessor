@@ -22,28 +22,41 @@ package db
 import (
 	"database/sql"
 	"log/slog"
+	"sync"
 
 	"github.com/go-sql-driver/mysql"
 
+	"github.com/SBOsoft/SBOLogProcessor/logparsers"
 	"github.com/SBOsoft/SBOLogProcessor/metrics"
 )
 
 type SBOAnalyticsDB struct {
-	DbInstance *sql.DB
+	DbInstance     *sql.DB
+	IsInitialized  bool
+	syncMutex      sync.Mutex
+	domainIdsCache map[string]int
 }
 
 func NewSBOAnalyticsDB() *SBOAnalyticsDB {
-	rv := SBOAnalyticsDB{}
+	rv := SBOAnalyticsDB{
+		domainIdsCache: make(map[string]int)}
 	return &rv
 }
 
 func (sboadb *SBOAnalyticsDB) Init(dbUser string, dbPassword string, dbAddress string, databaseName string) (bool, error) {
+	sboadb.syncMutex.Lock()
+	defer sboadb.syncMutex.Unlock()
+	if sboadb.IsInitialized {
+		//already initialized
+		return true, nil
+	}
 	cfg := mysql.NewConfig()
 	cfg.User = dbUser
 	cfg.Passwd = dbPassword
 	cfg.Net = "tcp"
 	cfg.Addr = dbAddress
 	cfg.DBName = databaseName
+	cfg.Params = map[string]string{"charset": "utf8mb4"}
 
 	var err error
 	sboadb.DbInstance, err = sql.Open("mysql", cfg.FormatDSN())
@@ -57,6 +70,7 @@ func (sboadb *SBOAnalyticsDB) Init(dbUser string, dbPassword string, dbAddress s
 		slog.Error("Failed to ping the db after connection", "error", pingErr)
 		return false, err
 	}
+	sboadb.IsInitialized = true
 	return true, nil
 }
 
@@ -69,6 +83,13 @@ func (sboadb *SBOAnalyticsDB) Close() (bool, error) {
 }
 
 func (sboadb *SBOAnalyticsDB) GetDomainId(domainName string) (int, error) {
+	sboadb.syncMutex.Lock()
+	defer sboadb.syncMutex.Unlock()
+
+	if sboadb.domainIdsCache[domainName] > 0 {
+		return sboadb.domainIdsCache[domainName], nil
+	}
+
 	result, err := sboadb.DbInstance.Exec("INSERT INTO sbo_domains (domain_name, created) VALUES (?, now())", domainName)
 	if err != nil {
 		//exists? try to select
@@ -81,11 +102,13 @@ func (sboadb *SBOAnalyticsDB) GetDomainId(domainName string) (int, error) {
 			}
 			return -1, err
 		} else {
+			sboadb.domainIdsCache[domainName] = domainId
 			return domainId, nil
 		}
 	} else {
 		newDomainId, err := result.LastInsertId()
-		return int(newDomainId), err
+		sboadb.domainIdsCache[domainName] = int(newDomainId)
+		return sboadb.domainIdsCache[domainName], err
 	}
 }
 
@@ -121,6 +144,46 @@ func (sboadb *SBOAnalyticsDB) SaveMetricData(data *metrics.SBOMetricWindowDataTo
 	_, err := sboadb.DbInstance.Exec(sql, domainId, data.MetricType, data.KeyValue, data.TimeWindow, data.MetricValue)
 	if err != nil {
 		slog.Error("SaveMetricData failed", "domainId", domainId, "data.FilePath", data.FilePath, "error", err)
+		return false, err
+	} else {
+		return true, nil
+	}
+}
+
+func (sboadb *SBOAnalyticsDB) SaveRawLog(data *logparsers.SBOHttpRequestLog, domainId int, hostId int, maskIPs bool) (bool, error) {
+	var sql string = "INSERT INTO sbo_rawlogs (domain_id, host_id, request_ts, client_ip, remote_user, http_method, " +
+		" path3, request_uri, http_status, bytes_sent, referer, is_malicious, " +
+		" ua_string, ua_os, ua_family, ua_device_type, ua_is_human, ua_intent) " +
+		" VALUES (?, ?, ?, "
+	if !maskIPs {
+		sql += " INET6_ATON(?) "
+	} else {
+		sql += " null "
+	}
+	sql += ", ?, ?, " +
+		" ?, ?, ?, ?, ?, ?, " +
+		"?, ?, ?, ?, ?, ?) "
+
+	var err error = nil
+	pathUpTo3rd := data.Path3
+	if len(pathUpTo3rd) < 1 {
+		pathUpTo3rd = data.Path2
+	}
+	if len(pathUpTo3rd) < 1 {
+		pathUpTo3rd = data.Path1
+	}
+
+	if !maskIPs {
+		_, err = sboadb.DbInstance.Exec(sql, domainId, hostId, data.Timestamp, data.ClientIP, data.RemoteUser, data.Method,
+			pathUpTo3rd, data.Path, data.Status, data.BytesSent, data.Referer, data.Malicious,
+			data.UserAgent.FullName, data.UserAgent.OS, data.UserAgent.Family, data.UserAgent.DeviceType, data.UserAgent.Human, data.UserAgent.Intent)
+	} else {
+		_, err = sboadb.DbInstance.Exec(sql, domainId, hostId, data.Timestamp, data.RemoteUser, data.Method,
+			pathUpTo3rd, data.Path, data.Status, data.BytesSent, data.Referer, data.Malicious,
+			data.UserAgent.FullName, data.UserAgent.OS, data.UserAgent.Family, data.UserAgent.DeviceType, data.UserAgent.Human, data.UserAgent.Intent)
+	}
+	if err != nil {
+		slog.Error("SaveRawLog failed", "domainId", domainId, "hostId", hostId, "timestamp", data.Timestamp, "error", err)
 		return false, err
 	} else {
 		return true, nil

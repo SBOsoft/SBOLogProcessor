@@ -62,6 +62,18 @@ type SBOHttpRequestLog struct {
 
 func (sbol *SBOHttpRequestLog) SBOHttpRequestLogSetUserAgent(userAgent string) {
 	sbol.UserAgent = NewSBOUserAgent(userAgent)
+
+	//we assume you are a bot if you requested /robots.txt
+	if sbol.Path1 == "/robots.txt" {
+		sbol.UserAgent.Human = Human_No
+		sbol.UserAgent.DeviceType = DeviceType_Script
+		//if it's not already some kind of bot, mark it as bot
+		if sbol.UserAgent.Family != UAFamily_AIBot && sbol.UserAgent.Family != UAFamily_SEOBot && sbol.UserAgent.Family != UAFamily_Script &&
+			sbol.UserAgent.Family != UAFamily_SearchBot && sbol.UserAgent.Family != UAFamily_SocialBot {
+			sbol.UserAgent.Family = UAFamily_OtherBot
+		}
+
+	}
 }
 
 func (sbol *SBOHttpRequestLog) SBOHttpRequestLogSetReferer(referer string, requestUri string) {
