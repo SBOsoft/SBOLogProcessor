@@ -408,7 +408,9 @@ func processSingleLogLine(filePath string, logLine string,
 			//TODO add formats and parsers here
 			{"Apache Common Log Format", logparsers.ParseApacheCommonLogFormat},
 			{"Apache Combined Log Format", logparsers.ParseApacheCombinedLogFormat},
-			//{"Apache VHost Combined Log Format", logparsers.ParseApacheVHostCombinedLogFormat},
+			{"Apache VHost Combined Log Format", logparsers.ParseApacheVHostCombinedLogFormat},
+			{"Nginx Combined Log Format", logparsers.ParseNginxCombinedFormat},
+			{"Nginx Custom Log Format", logparsers.ParseNginxCustomFormat},
 		}
 		slog.Debug("parserFunction not set, trying to find a match")
 

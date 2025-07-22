@@ -20,17 +20,19 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 package metrics
 
 import (
-	"log/slog"
 	"testing"
-	"time"
 )
 
 func TestSBOMetricTimeWindow(t *testing.T) {
-	timest := time.Date(2025, 11, 17, 20, 34, 58, 651387237, time.UTC)
+
 	metricManager := NewSBOMetricsManager(5)
 	sbom := NewSBOMetric(SBO_METRIC_REQ_COUNT, "aaa", metricManager)
-	sbom.addValue("unittest", timest, 100)
+	var tw int64 = 202511172034
+	sbom.addValue("unittest", tw, 100)
 
-	slog.Warn("Values", "values", sbom.Values)
+	//slog.Warn("Values", "values", sbom.Values)
+	if sbom.Values[tw] != 100 {
+		t.Error("sbom.Values does not contain expected entry", sbom.Values)
+	}
 
 }
