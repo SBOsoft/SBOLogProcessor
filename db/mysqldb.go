@@ -82,15 +82,17 @@ func (sboadb *SBOAnalyticsDB) Close() (bool, error) {
 	return true, nil
 }
 
-func (sboadb *SBOAnalyticsDB) GetDomainId(domainName string) (int, error) {
+func (sboadb *SBOAnalyticsDB) GetDomainId(domainName string, timeWindowSizeInMinutes int) (int, error) {
 	sboadb.syncMutex.Lock()
 	defer sboadb.syncMutex.Unlock()
 
 	if sboadb.domainIdsCache[domainName] > 0 {
 		return sboadb.domainIdsCache[domainName], nil
 	}
-
-	result, err := sboadb.DbInstance.Exec("INSERT INTO sbo_domains (domain_name, created) VALUES (?, now())", domainName)
+	//Note timeWindowSizeInMinutes is set only on initial creation, requires manual db update if needed
+	// e.g you collected some data with timeWindowSizeInMinutes=10 then you changed it to 5, leaving it unchanged if decreasing should be okay
+	// consider updating the db record if increasing timeWindowSizeInMinutes
+	result, err := sboadb.DbInstance.Exec("INSERT INTO sbo_domains (domain_name, created, timeWindowSizeMinutes) VALUES (?, now(), ?)", ReduceToMaxColumnLen(domainName, 255), timeWindowSizeInMinutes)
 	if err != nil {
 		//exists? try to select
 		var domainId int
@@ -141,7 +143,7 @@ func (sboadb *SBOAnalyticsDB) SaveMetricData(data *metrics.SBOMetricWindowDataTo
 	} else {
 		sql += "ON DUPLICATE KEY UPDATE metric_value=metric_value+VALUES(metric_value)"
 	}
-	_, err := sboadb.DbInstance.Exec(sql, domainId, data.MetricType, data.KeyValue, data.TimeWindow, data.MetricValue)
+	_, err := sboadb.DbInstance.Exec(sql, domainId, data.MetricType, ReduceToMaxColumnLen(data.KeyValue, 100), data.TimeWindow, data.MetricValue)
 	if err != nil {
 		slog.Error("SaveMetricData failed", "domainId", domainId, "data.FilePath", data.FilePath, "error", err)
 		return false, err
@@ -174,18 +176,49 @@ func (sboadb *SBOAnalyticsDB) SaveRawLog(data *logparsers.SBOHttpRequestLog, dom
 	}
 
 	if !maskIPs {
-		_, err = sboadb.DbInstance.Exec(sql, domainId, hostId, data.Timestamp, data.ClientIP, data.RemoteUser, data.Method,
-			pathUpTo3rd, data.Path, data.Status, data.BytesSent, data.Referer, data.Malicious,
-			data.UserAgent.FullName, data.UserAgent.OS, data.UserAgent.Family, data.UserAgent.DeviceType, data.UserAgent.Human, data.UserAgent.Intent)
+		_, err = sboadb.DbInstance.Exec(sql, domainId, hostId, data.Timestamp, data.ClientIP,
+			ReduceToMaxColumnLen(data.RemoteUser, 100),
+			ReduceToMaxColumnLen(data.Method, 20),
+			ReduceToMaxColumnLen(pathUpTo3rd, 100),
+			ReduceToMaxColumnLen(data.Path, 100),
+			data.Status, data.BytesSent,
+			ReduceToMaxColumnLen(data.Referer, 100),
+			data.Malicious,
+			ReduceToMaxColumnLen(data.UserAgent.FullName, 100),
+			ReduceToMaxColumnLen(data.UserAgent.OS, 20),
+			ReduceToMaxColumnLen(data.UserAgent.Family, 20),
+			ReduceToMaxColumnLen(data.UserAgent.DeviceType, 20),
+			ReduceToMaxColumnLen(data.UserAgent.Human, 20),
+			ReduceToMaxColumnLen(data.UserAgent.Intent, 20))
 	} else {
-		_, err = sboadb.DbInstance.Exec(sql, domainId, hostId, data.Timestamp, data.RemoteUser, data.Method,
-			pathUpTo3rd, data.Path, data.Status, data.BytesSent, data.Referer, data.Malicious,
-			data.UserAgent.FullName, data.UserAgent.OS, data.UserAgent.Family, data.UserAgent.DeviceType, data.UserAgent.Human, data.UserAgent.Intent)
+		_, err = sboadb.DbInstance.Exec(sql, domainId, hostId, data.Timestamp,
+			ReduceToMaxColumnLen(data.RemoteUser, 100),
+			ReduceToMaxColumnLen(data.Method, 20),
+			ReduceToMaxColumnLen(pathUpTo3rd, 100),
+			ReduceToMaxColumnLen(data.Path, 100),
+			data.Status, data.BytesSent,
+			ReduceToMaxColumnLen(data.Referer, 100),
+			data.Malicious,
+			ReduceToMaxColumnLen(data.UserAgent.FullName, 100),
+			ReduceToMaxColumnLen(data.UserAgent.OS, 20),
+			ReduceToMaxColumnLen(data.UserAgent.Family, 20),
+			ReduceToMaxColumnLen(data.UserAgent.DeviceType, 20),
+			ReduceToMaxColumnLen(data.UserAgent.Human, 20),
+			ReduceToMaxColumnLen(data.UserAgent.Intent, 20))
 	}
 	if err != nil {
 		slog.Error("SaveRawLog failed", "domainId", domainId, "hostId", hostId, "timestamp", data.Timestamp, "error", err)
 		return false, err
 	} else {
+		//slog.Debug("SaveRawLog succeeded", "domainId", domainId, "hostId", hostId, "timestamp", data.Timestamp, "error", err)
 		return true, nil
 	}
+}
+
+func ReduceToMaxColumnLen(str string, colSize int) string {
+	if len(str) <= colSize {
+		return str
+	}
+	//TODO assuming ASCII, add unicode support
+	return str[:colSize]
 }

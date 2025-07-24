@@ -283,7 +283,8 @@ func createHandler(filePath string, handlerName string, dataToSaveChan chan *met
 	return nil
 }
 
-func processFile(filePath string, wg *sync.WaitGroup) {
+func processFile(filePath string, parentWaitGroup *sync.WaitGroup) {
+	defer parentWaitGroup.Done()
 
 	lines := make(chan string, 10) // Buffered channel to prevent blocking
 	dataToBeSavedChannel := make(chan *metrics.SBOMetricWindowDataToBeSaved, 100)
@@ -295,18 +296,22 @@ func processFile(filePath string, wg *sync.WaitGroup) {
 		sbodb.Init(globalConfig[filePath].DbUser, globalConfig[filePath].DbPassword, globalConfig[filePath].DbAddress, globalConfig[filePath].DbDatabase)
 	}
 
-	wg.Add(1)
+	var waitGroupForThisFile sync.WaitGroup
+	waitGroupForThisFile.Add(1)
 	// Start consumer (producer -> consumer -> save data) consumer generates metrics etc
-	go consumeLinesFromChannel(filePath, lines, wg, dataToBeSavedChannel, sbodb)
+	go consumeLinesFromChannel(filePath, lines, &waitGroupForThisFile, dataToBeSavedChannel, sbodb)
 
-	wg.Add(1)
+	waitGroupForThisFile.Add(1)
 
 	// Start goroutine for saving data
-	go processMetricDataToBeSaved(filePath, dataToBeSavedChannel, wg, sbodb)
+	go processMetricDataToBeSaved(filePath, dataToBeSavedChannel, &waitGroupForThisFile, sbodb)
 
 	// Start producer
 	produceLinesFromFile(filePath, lines)
-	defer wg.Done()
+
+	//WaitGroup specific to the file
+	waitGroupForThisFile.Wait()
+	slog.Info("Finished processing file", "file", filePath)
 }
 
 func configureLogging(logLevel slog.Level) *os.File {
@@ -334,7 +339,6 @@ Save metric data
 func processMetricDataToBeSaved(filePath string, dataToBeSavedChannel chan *metrics.SBOMetricWindowDataToBeSaved, wg *sync.WaitGroup, sbodb *db.SBOAnalyticsDB) {
 
 	defer wg.Done()
-	domainIdsCache := make(map[string]int)
 
 	for dataToSave := range dataToBeSavedChannel {
 		if !globalConfig[filePath].WriteMetricsToDb {
@@ -345,12 +349,8 @@ func processMetricDataToBeSaved(filePath string, dataToBeSavedChannel chan *metr
 		if len(dataToSave.DomainName) > 0 {
 			domainName = dataToSave.DomainName
 		}
-		domainId := domainIdsCache[domainName]
-		if domainId < 1 {
-			//TODO don't ignore the error?
-			domainId, _ := sbodb.GetDomainId(domainName)
-			domainIdsCache[domainName] = domainId
-		}
+
+		domainId, _ := sbodb.GetDomainId(domainName, globalConfig[filePath].TimeWindowSizeMinutes)
 		/*
 			if domainId < 1 {
 				slog.Warn("domainId < 1 for data", "data", dataToSave)
@@ -442,9 +442,9 @@ func processSingleLogLine(filePath string, logLine string,
 			if globalConfig[filePath].SaveLogsToDb && sbodb != nil && sbodb.IsInitialized {
 				var domainId int = 0
 				if len(parseResult.Domain) > 0 {
-					domainId, _ = sbodb.GetDomainId(parseResult.Domain)
+					domainId, _ = sbodb.GetDomainId(parseResult.Domain, globalConfig[filePath].TimeWindowSizeMinutes)
 				} else {
-					domainId, _ = sbodb.GetDomainId(globalConfig[filePath].DomainName)
+					domainId, _ = sbodb.GetDomainId(globalConfig[filePath].DomainName, globalConfig[filePath].TimeWindowSizeMinutes)
 				}
 				if globalConfig[filePath].SaveLogsToDbOnlyRelevant == 1 {
 					//save only if not irrelevant
