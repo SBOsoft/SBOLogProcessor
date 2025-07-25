@@ -3,8 +3,8 @@ Access Log Processor and Metrics Generator
 
 There are 3 main use cases (profiles) supported by this tool:
 
- 1. Counter mode (when -p=count option is provided): Counts logs from an access log file and prints statistics to stdout every 30 seconds
- 2. Metrics generator (when -p=metrics option is provided): Processes logs from an access log file (or files) and generates metrics, which can be saved into a mysql database to be used with [SBOanalytics](https://github.com/SBOsoft/SBOanalytics) (a web front-end for metrics) or just printed to stdout.
+ 1. Counter mode (when -p=count option is provided): Counts logs from an access log file and prints statistics to stdout every 30 seconds.  For example, running `sbologp -p count /var/log/apache2/example.com-access.log` will print stats from /var/log/apache2/example.com-access.log file every 30 seconds.
+ 2. Metrics generator (when -p=metrics option is provided): Processes logs from an access log file (or files) and generates metrics, which can be saved into a mysql database to be used with [SBOanalytics](https://github.com/SBOsoft/SBOanalytics) (web front-end for metrics) or just printed to stdout. Optionally processed (and optionally filtered) logs can be pushed to a mysql server, later to be viewed using SBOanalytics.
  3. Security mode (when -p=security option is provided): (**Not implemented yet**) Processes logs from an access log file and outputs potential security issues (e.g abuser, stats on sql injection attempts etc) giving you a list of IPs and/or patterns that you may want to block
 
 # Usage 
@@ -21,15 +21,18 @@ There are too many options which may not have a corresponding command line param
 See https://github.com/SBOsoft/SBOLogProcessor/tree/main/conf/example-config-file.json for configuration examples.
 Configuration must be a json map, with file paths as keys. 
 
+For more details on configuration options, see comments for `type ConfigForAMonitoredFile struct ` near the bottom of 
+https://github.com/SBOsoft/SBOLogProcessor/blob/main/main.go.
+
 ## Example commands
 Examples assume you are running a linux, e.g ubuntu.
 
 ### Counter mode
-Run in counter mode and follow changes, print stats every 30 seconds:
+Run in counter mode and follow changes, prints stats every 30 seconds:
 
 ```./sbologp -f -p=count /var/log/apache2/access.log```
 
-Run in counter mode without following changes, print total stats:
+Run in counter mode without following changes, prints total stats:
 
 ```./sbologp -p=count /var/log/apache2/access.log```
 

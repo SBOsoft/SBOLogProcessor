@@ -727,28 +727,32 @@ type ConfigForAMonitoredFile struct {
 	TimeWindowSizeMinutes int
 	//used for logs "re-logged" to a different file. parsed log entries will be written as 1 json entry per line into this file
 	//only used by writetofile.go
-	WriteToFileTargetFile  string
-	HandlerInstances       map[string]SBOLogHandlerInterface
-	WriteMetricsToDb       bool
-	DbAddress              string
-	DbUser                 string
-	DbPassword             string
-	DbDatabase             string
+	WriteToFileTargetFile string
+	HandlerInstances      map[string]SBOLogHandlerInterface
+	WriteMetricsToDb      bool
+	DbAddress             string
+	DbUser                string
+	DbPassword            string
+	DbDatabase            string
+	//when true then if a metric entry already exists the will be replaced,
+	// when false then if a metric entry already exists then the value will be added to the existing value
 	ReplaceExistingMetrics bool
 	//Only a limited number of most recent time window values will be kept active and others will be removed out of scope (and saved)
 	// e.g if we encounter logs for 202507021121 and 202507021122 and 202507021123 then we should be able to handle them
 	// e.g if they are somehow unordered, e.g a request takes too long to complete and is logged after subsequent requests
 	// or when timewindow goes out of scope when new time window values are encountered
+	// this assumes/requires that the logs are in chronological order
 	MetricsWindowSize int
-	//number of top N items like IP addresses to be displayed in outputs
+	//number of top N items like IP addresses to be displayed in outputs for counter mode (when -p=count option is provided)
 	CounterTopNForKeyedMetrics int
-	//when following, interval for updating stats/output
+	//when following, interval for updating stats/output for counter mode (when -p=count option is provided)
 	CounterOutputIntervalSeconds int
-	//when true logs will be saved in to
-	SaveLogsToDb        bool
+	//when true logs will be saved into an SBOanalytics mysql database
+	SaveLogsToDb bool
+	//when true, IP addresses will not be saved into SBOanalytics database
 	SaveLogsToDbMaskIPs bool
-	//when 1 requests from bots, scanners, 30x, 40x etc will be skipped.
-	//other values MAY be added in the future so for now treat it as an enum which supports only 0 and 1
+	//when 1 requests from bots, scanners, 30x, 40x etc will be skipped. when 0 all logs will be saved into the database
+	//other values MAY be added in the future so you must treat it as an enum, which supports only 0 and 1 for the time being
 	SaveLogsToDbOnlyRelevant int
 }
 
