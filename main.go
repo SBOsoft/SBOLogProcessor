@@ -51,6 +51,8 @@ const (
 	SBO_LOGP_LOG_FILE string = "./sbologp-logs.log"
 )
 
+const DEFAULT_CONFIG_KEY string = "--default--"
+
 var globalConfig map[string]ConfigForAMonitoredFile = make(map[string]ConfigForAMonitoredFile)
 var globalActiveProfile string = SBO_GLOBAL_PROFILE_METRICS
 var globalActiveLogLevel slog.Level = slog.LevelInfo
@@ -81,6 +83,19 @@ func main() {
 
 	wg.Wait()
 
+}
+
+func getConfigForFile(filePath string) *ConfigForAMonitoredFile {
+	foundConfig, ok := globalConfig[filePath]
+	if !ok {
+		foundConfig, ok = globalConfig[DEFAULT_CONFIG_KEY]
+	}
+
+	if !ok {
+		slog.Warn("Failed to find configuration for file", "filePath", filePath)
+	}
+
+	return &foundConfig
 }
 
 /*
@@ -258,24 +273,24 @@ func loadConfigFromFile(configFileName string) bool {
 }
 
 func createHandler(filePath string, handlerName string, dataToSaveChan chan *metrics.SBOMetricWindowDataToBeSaved, metricsManager *metrics.SBOMetricsManager) SBOLogHandlerInterface {
-
+	config := getConfigForFile(filePath)
 	switch {
 	case handlerName == handlers.WRITE_TO_FILE_HANDLER_NAME:
 		writeToFile := handlers.NewWriteToFileHandler()
-		err := writeToFile.Begin(globalConfig[filePath].WriteToFileTargetFile)
+		err := writeToFile.Begin(config.WriteToFileTargetFile)
 		slog.Info("Created WriteToFileHandler", "error", err)
 		return writeToFile
 	case handlerName == handlers.METRIC_GENERATOR_HANDLER_NAME:
-		metricsGenerator := handlers.NewMetricGeneratorHandler(filePath, metricsManager, globalConfig[filePath].TimeWindowSizeMinutes)
+		metricsGenerator := handlers.NewMetricGeneratorHandler(filePath, metricsManager, config.TimeWindowSizeMinutes)
 		metricsGenerator.Begin(dataToSaveChan)
 		slog.Info("Created MetricGeneratorHandler")
 		return metricsGenerator
 	case handlerName == handlers.COUNTER_HANDLER_NAME:
 		counterHandler := handlers.NewCounterHandler(filePath)
 		counterHandler.Begin(dataToSaveChan,
-			globalConfig[filePath].Follow,
-			globalConfig[filePath].CounterOutputIntervalSeconds,
-			globalConfig[filePath].CounterTopNForKeyedMetrics)
+			config.Follow,
+			config.CounterOutputIntervalSeconds,
+			config.CounterTopNForKeyedMetrics)
 		slog.Info("Created CounterHandler")
 		return counterHandler
 	}
@@ -285,15 +300,15 @@ func createHandler(filePath string, handlerName string, dataToSaveChan chan *met
 
 func processFile(filePath string, parentWaitGroup *sync.WaitGroup) {
 	defer parentWaitGroup.Done()
-
+	config := getConfigForFile(filePath)
 	lines := make(chan string, 10) // Buffered channel to prevent blocking
 	dataToBeSavedChannel := make(chan *metrics.SBOMetricWindowDataToBeSaved, 100)
 
 	sbodb := db.NewSBOAnalyticsDB()
-	if globalConfig[filePath].WriteMetricsToDb || globalConfig[filePath].SaveLogsToDb {
+	if config.WriteMetricsToDb || config.SaveLogsToDb {
 		//if not writing to db then db stuff is unnecessary
 		defer sbodb.Close()
-		sbodb.Init(globalConfig[filePath].DbUser, globalConfig[filePath].DbPassword, globalConfig[filePath].DbAddress, globalConfig[filePath].DbDatabase)
+		sbodb.Init(config.DbUser, config.DbPassword, config.DbAddress, config.DbDatabase)
 	}
 
 	var waitGroupForThisFile sync.WaitGroup
@@ -339,24 +354,24 @@ Save metric data
 func processMetricDataToBeSaved(filePath string, dataToBeSavedChannel chan *metrics.SBOMetricWindowDataToBeSaved, wg *sync.WaitGroup, sbodb *db.SBOAnalyticsDB) {
 
 	defer wg.Done()
-
+	config := getConfigForFile(filePath)
 	for dataToSave := range dataToBeSavedChannel {
-		if !globalConfig[filePath].WriteMetricsToDb {
+		if !config.WriteMetricsToDb {
 			//nothing to do here, just move
 			continue
 		}
-		domainName := globalConfig[filePath].DomainName
+		domainName := config.DomainName
 		if len(dataToSave.DomainName) > 0 {
 			domainName = dataToSave.DomainName
 		}
 
-		domainId, _ := sbodb.GetDomainId(domainName, globalConfig[filePath].TimeWindowSizeMinutes)
+		domainId, _ := sbodb.GetDomainId(domainName, config.TimeWindowSizeMinutes)
 		/*
 			if domainId < 1 {
 				slog.Warn("domainId < 1 for data", "data", dataToSave)
 			}
 		*/
-		sbodb.SaveMetricData(dataToSave, domainId, globalConfig[filePath].ReplaceExistingMetrics)
+		sbodb.SaveMetricData(dataToSave, domainId, config.ReplaceExistingMetrics)
 		slog.Debug("processMetricDataToBeSaved save data:", "dataToSave", dataToSave)
 	}
 
@@ -367,12 +382,12 @@ func consumeLinesFromChannel(filePath string, linesChannel chan string, wg *sync
 	var processedLineCount, errorCount int
 	var parserFunction func(string) (*logparsers.SBOHttpRequestLog, error) = nil
 	var lineResult bool
-
+	config := getConfigForFile(filePath)
 	//*metrics.SBOMetricsManager
-	metricsManager := metrics.NewSBOMetricsManager(globalConfig[filePath].MetricsWindowSize)
+	metricsManager := metrics.NewSBOMetricsManager(config.MetricsWindowSize)
 
-	for _, handlerName := range globalConfig[filePath].Handlers {
-		globalConfig[filePath].HandlerInstances[handlerName] = createHandler(filePath, handlerName, dataToBeSavedChannel, metricsManager)
+	for _, handlerName := range config.Handlers {
+		config.HandlerInstances[handlerName] = createHandler(filePath, handlerName, dataToBeSavedChannel, metricsManager)
 	}
 
 	defer wg.Done()
@@ -388,7 +403,7 @@ func consumeLinesFromChannel(filePath string, linesChannel chan string, wg *sync
 		}
 	}
 
-	for _, h := range globalConfig[filePath].HandlerInstances {
+	for _, h := range config.HandlerInstances {
 		h.End()
 	}
 
@@ -405,6 +420,7 @@ func processSingleLogLine(filePath string, logLine string,
 	}
 	var parseResult *logparsers.SBOHttpRequestLog
 	var parseErr error
+	config := getConfigForFile(filePath)
 
 	if parserFunction == nil {
 		// Try parsing with each format
@@ -439,14 +455,14 @@ func processSingleLogLine(filePath string, logLine string,
 			//now calculate stats or do whatever needs to be done
 			callHandlersForRequestLogEntry(filePath, parseResult, dataToBeSavedChannel)
 			//save log to db
-			if globalConfig[filePath].SaveLogsToDb && sbodb != nil && sbodb.IsInitialized {
+			if config.SaveLogsToDb && sbodb != nil && sbodb.IsInitialized {
 				var domainId int = 0
 				if len(parseResult.Domain) > 0 {
-					domainId, _ = sbodb.GetDomainId(parseResult.Domain, globalConfig[filePath].TimeWindowSizeMinutes)
+					domainId, _ = sbodb.GetDomainId(parseResult.Domain, config.TimeWindowSizeMinutes)
 				} else {
-					domainId, _ = sbodb.GetDomainId(globalConfig[filePath].DomainName, globalConfig[filePath].TimeWindowSizeMinutes)
+					domainId, _ = sbodb.GetDomainId(config.DomainName, config.TimeWindowSizeMinutes)
 				}
-				if globalConfig[filePath].SaveLogsToDbOnlyRelevant == 1 {
+				if config.SaveLogsToDbOnlyRelevant == 1 {
 					//save only if not irrelevant
 					if (parseResult.Malicious == logparsers.REQUEST_MALICIOUS_UNKNOWN) &&
 						(strings.HasPrefix(parseResult.Status, "2") || strings.HasPrefix(parseResult.Status, "5")) &&
@@ -456,10 +472,10 @@ func processSingleLogLine(filePath string, logLine string,
 							//parseResult.UserAgent.Family != logparsers.UAFamily_SocialBot &&
 							//parseResult.UserAgent.Family != logparsers.UAFamily_SearchBot &&
 							parseResult.UserAgent.Family != logparsers.UAFamily_Script) {
-						sbodb.SaveRawLog(parseResult, domainId, globalConfig[filePath].HostId, globalConfig[filePath].SaveLogsToDbMaskIPs)
+						sbodb.SaveRawLog(parseResult, domainId, config.HostId, config.SaveLogsToDbMaskIPs)
 					}
 				} else {
-					sbodb.SaveRawLog(parseResult, domainId, globalConfig[filePath].HostId, globalConfig[filePath].SaveLogsToDbMaskIPs)
+					sbodb.SaveRawLog(parseResult, domainId, config.HostId, config.SaveLogsToDbMaskIPs)
 				}
 
 			}
@@ -472,7 +488,8 @@ func processSingleLogLine(filePath string, logLine string,
 
 func callHandlersForRequestLogEntry(filePath string, parsedLogEntry *logparsers.SBOHttpRequestLog, dataToBeSavedChannel chan *metrics.SBOMetricWindowDataToBeSaved) {
 	//processMetricsForRequestLogEntry(filePath, parsedLogEntry)
-	for _, h := range globalConfig[filePath].HandlerInstances {
+	config := getConfigForFile(filePath)
+	for _, h := range config.HandlerInstances {
 		h.HandleEntry(parsedLogEntry)
 	}
 
@@ -483,9 +500,10 @@ func produceLinesFromFile(filePath string, lines chan<- string) {
 	var watcher *fsnotify.Watcher
 	slog.Debug("produceLinesFromFile global config", "globalConfig", globalConfig)
 	defer close(lines)
+	config := getConfigForFile(filePath)
 
 	var watcherErr error
-	if globalConfig[filePath].Follow {
+	if config.Follow {
 		watcher, watcherErr = fsnotify.NewWatcher()
 		if watcherErr != nil {
 			slog.Error("Error setting up fsnotify.NewWatcher", "filePath", filePath, "error", watcherErr)
@@ -520,7 +538,7 @@ func produceLinesFromFile(filePath string, lines chan<- string) {
 		if fileReader != nil {
 			if !waitingForNewData { //dont even try to read if just waiting
 				isFileAtEnd = readSingleLineFromFileReturnTrueIfEOF(filePath, lines, fileReader)
-				if isFileAtEnd && !globalConfig[filePath].Follow {
+				if isFileAtEnd && !config.Follow {
 					slog.Info("Finished reading the file and not following, so done...")
 					return
 				}
@@ -539,7 +557,7 @@ func produceLinesFromFile(filePath string, lines chan<- string) {
 			break
 		}
 
-		if globalConfig[filePath].Follow {
+		if config.Follow {
 			//slog.Warn("follow in produceLinesFromFile before select")
 			select {
 			case event, ok := <-watcher.Events:
@@ -606,7 +624,7 @@ func openFile(reopeningAfterRotate bool, filePath string) (*os.File, *bufio.Read
 	var err error
 	var file *os.File
 	var fileReader *bufio.Reader
-
+	config := getConfigForFile(filePath)
 	file, err = os.Open(filePath)
 
 	fileReader = nil
@@ -616,7 +634,7 @@ func openFile(reopeningAfterRotate bool, filePath string) (*os.File, *bufio.Read
 		return file, fileReader, err
 	}
 
-	if reopeningAfterRotate || globalConfig[filePath].StartFrom == START_FROM_BEGINNING {
+	if reopeningAfterRotate || config.StartFrom == START_FROM_BEGINNING {
 		// Seek to beginning if file exists
 		_, err = file.Seek(0, 0)
 		if err != nil {
@@ -624,7 +642,7 @@ func openFile(reopeningAfterRotate bool, filePath string) (*os.File, *bufio.Read
 			slog.Error("Error seeking to beginning of file", "filePath", filePath, "error", err)
 			return file, fileReader, err
 		}
-	} else if globalConfig[filePath].StartFrom == START_FROM_END || globalConfig[filePath].StartFrom < 0 {
+	} else if config.StartFrom == START_FROM_END || config.StartFrom < 0 {
 		// Seek to end if file exists
 		_, err = file.Seek(0, 2)
 		if err != nil {
@@ -634,13 +652,13 @@ func openFile(reopeningAfterRotate bool, filePath string) (*os.File, *bufio.Read
 		}
 	} else {
 		//skip until the line
-		slog.Info("Skipping lines after opening file", "skippedLines", globalConfig[filePath].StartFrom)
+		slog.Info("Skipping lines after opening file", "skippedLines", config.StartFrom)
 		fileReader = bufio.NewReaderSize(file, 8192)
 		lineNo := 1
 		for {
 			_, err := fileReader.ReadString('\n')
 			lineNo++
-			if lineNo >= globalConfig[filePath].StartFrom {
+			if lineNo >= config.StartFrom {
 				break
 			}
 			if err != nil {
@@ -692,12 +710,14 @@ const (
 )
 
 type ConfigForAMonitoredFile struct {
-	Enabled                bool
-	FilePath               string
-	Handlers               []string
-	StartFrom              int
+	Enabled   bool
+	FilePath  string
+	Handlers  []string
+	StartFrom int
+	//Not implemented yet
 	SkipIfLineMatchesRegex string
-	Follow                 bool
+	//Follow changes to the file, like tail -f
+	Follow bool
 	//if not available in logs
 	DomainName string
 	//Unique host id, must be configured by the user

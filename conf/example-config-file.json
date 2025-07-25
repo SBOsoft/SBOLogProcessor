@@ -1,7 +1,7 @@
 {
-    "/var/log/apache2/example.com-access.log": {
+    "--default--": {
         "Enabled": true,
-        "FilePath": "/var/log/apache2/example.com-access.log",
+        "FilePath": "This is not a real file. This is the default configuration if no specific configuration entry is provided for a file",
         "Handlers": [
             "Available handlers are as follows, in theory you can use more than one handler and each processed log line will be passed to each configured handler in the order defined here BUT mixing METRICS and COUNTER handlers may not work as expected",
             "METRICS",
@@ -26,7 +26,7 @@
         "SaveLogsToDb": true,
         "SaveLogsToDbMaskIPs": true,
         "SaveLogsToDbOnlyRelevant": 0        
-    },
+    },    
     "/var/log/apache2/COUNTER-example-access.log": {
         "Enabled": true,
         "FilePath": "/var/log/apache2/COUNTER-example-access.log",
