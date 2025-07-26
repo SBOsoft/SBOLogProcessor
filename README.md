@@ -7,16 +7,36 @@ There are 3 main use cases (profiles) supported by this tool:
  2. Metrics generator (when -p=metrics option is provided): Processes logs from an access log file (or files) and generates metrics, which can be saved into a mysql database to be used with [SBOanalytics](https://github.com/SBOsoft/SBOanalytics) (web front-end for metrics) or just printed to stdout. Optionally processed (and optionally filtered) logs can be pushed to a mysql server, later to be viewed using SBOanalytics.
  3. Security mode (when -p=security option is provided): (**Not implemented yet**) Processes logs from an access log file and outputs potential security issues (e.g abuser, stats on sql injection attempts etc) giving you a list of IPs and/or patterns that you may want to block
 
-# Usage 
+# Usage
+This is a command line tool without a user interface.
+
+## Database configuration
+If you want to save metrics and logs to a database, i.e to query using SBOanalytics, then you must set up a mysql database
+before running this tool.
+A database is not required for counter mode.
+
+Database set up scripts can be found at https://github.com/SBOsoft/SBOanalytics/tree/main/db. There are multiple database script files named 
+using yyyymmddxxxx format, for example 20250721-somedescriptivepart.sql, where xxxx part is typically 0001. 
+
+During the initial set up you must run all files in alphabetical order. 
+
+During upgrades only run files that were added after the last time you updated your database. Both SBOLogProcessor and SBOanalytics 
+use version numbers following yyyy.mm.dd.xxxx pattern, e.g 2025.07.11.0001. You can find your current version number in version.txt files in
+both SBOLogProcessor and SBOanalytics packages.
+
+So if your current version is 2025.07.15.0001 and want to upgrade to 2025.07.25.0001 then you must run database scripts created 
+after 202507150001. 
+
+**You MUST always run sql files in alphabetical order.**
 
 ## Binary releases
-Download a precompiled binary from [releases](https://github.com/SBOsoft/SBOLogProcessor/releases) page, unzip/untar and execute sbologp (or sbologp.exe on windows) command.
+Download a precompiled binary from [releases](https://github.com/SBOsoft/SBOLogProcessor/releases) page, unzip/untar and execute `sbologp` (or sbologp.exe on windows) command.
 
 ## Command line options and configuration
 
 Run `sbologp -h` to see available command line options.
 
-There are too many options which may not have a corresponding command line parameter so if you need more control, passing a configuration file using -c option might be required.
+There are too many options which may not have a corresponding command line parameter so if you need more control, passing a configuration file using -c option is required.
 
 See https://github.com/SBOsoft/SBOLogProcessor/tree/main/conf/example-config-file.json for configuration examples.
 Configuration must be a json map, with file paths as keys. 
@@ -28,11 +48,13 @@ https://github.com/SBOsoft/SBOLogProcessor/blob/main/main.go.
 Examples assume you are running a linux, e.g ubuntu.
 
 ### Counter mode
-Run in counter mode and follow changes, prints stats every 30 seconds:
+Counter mode generates statistics from an access log file. 
+
+Run the application in counter mode (following changes to the file like tail -f), and print stats every 30 seconds incrementally:
 
 ```./sbologp -f -p=count /var/log/apache2/access.log```
 
-Run in counter mode without following changes, prints total stats:
+Run in counter mode without following changes, prints total stats and exits:
 
 ```./sbologp -p=count /var/log/apache2/access.log```
 
