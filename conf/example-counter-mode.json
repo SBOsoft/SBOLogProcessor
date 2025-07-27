@@ -1,0 +1,14 @@
+{
+     "--default--": {
+        "Enabled": true,
+        "FilePath": "This configuration will apply to all files so this field will not be actually used",
+        "Handlers": [
+            "COUNTER"
+        ],
+        "StartFrom": -1,
+        "SkipIfLineMatchesRegex": null,
+        "Follow": true,
+        "CounterTopNForKeyedMetrics": 10,
+        "CounterOutputIntervalSeconds": 30
+    }
+}

@@ -1,0 +1,24 @@
+{
+    "--default--": {
+        "Enabled": true,
+        "FilePath": "This is the default configuration if no specific configuration entry is provided for a file",
+        "Handlers": [
+            "METRICS"
+        ],
+        "StartFrom": 0,
+        "SkipIfLineMatchesRegex": null,
+        "Follow": true,
+        "DomainName": "CHANGE_THIS_default-domain-if-not-found-in-log-line.example.com",
+        "HostId": 1,
+        "TimeWindowSizeMinutes": 10,
+        "WriteMetricsToDb": true,
+        "DbAddress":"CHANGE_THIS-database-address",
+        "DbUser":"CHANGE_THIS-database-user",
+        "DbPassword":"CHANGE_THIS-password-for-the-database-user",
+        "DbDatabase":"CHANGE_THIS-database-name",
+        "ReplaceExistingMetrics":false,
+        "SaveLogsToDb": true,
+        "SaveLogsToDbMaskIPs": true,
+        "SaveLogsToDbOnlyRelevant": 1        
+    }
+}

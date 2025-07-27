@@ -38,7 +38,8 @@ Run `sbologp -h` to see available command line options.
 
 There are too many options which may not have a corresponding command line parameter so if you need more control, passing a configuration file using -c option is required.
 
-See https://github.com/SBOsoft/SBOLogProcessor/tree/main/conf/example-config-file.json for configuration examples.
+See https://github.com/SBOsoft/SBOLogProcessor/tree/main/conf/ for example configurations. Normally copying a configuration example  and modifying it to meet your needs and then running the application using `-c` option should suffice. 
+
 Configuration must be a json map, with file paths as keys. 
 
 For more details on configuration options, see comments for `type ConfigForAMonitoredFile struct ` near the bottom of 
