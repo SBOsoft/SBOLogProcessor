@@ -2,12 +2,12 @@
 
 ## Counter mode
 
-### [example-counter-mode.json] 
+### [example-counter-mode.json](example-counter-mode.json)
 Configuration options for counter mode. `CounterTopNForKeyedMetrics` controls how many items such as IP addresses will be displayed.
 `CounterOutputIntervalSeconds` controls output interval. `StartFrom=-1` means processing will start from the end of the file. 
 `StartFrom=-0` will make the program start from the beginning of the file. 
 
-### [example-metrics-mode.json] 
+### [example-metrics-mode.json](example-metrics-mode.json)
 Configuration options for metrics mode. 
 
   - `StartFrom=-1` means processing will start from the end of the file. `StartFrom=-0` will make the program start from the beginning of the file. 
