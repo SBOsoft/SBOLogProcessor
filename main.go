@@ -57,7 +57,7 @@ const DEFAULT_CONFIG_KEY string = "--default--"
 // there may be an entry with this name in the config file
 const OSMETRICS_CONFIG_KEY string = "--OS-metrics--"
 
-var globalConfig map[string]ConfigForAMonitoredFile = make(map[string]ConfigForAMonitoredFile)
+var globalConfig map[string]*ConfigForAMonitoredFile = make(map[string]*ConfigForAMonitoredFile)
 var globalActiveProfile string = SBO_GLOBAL_PROFILE_METRICS
 var globalActiveLogLevel slog.Level = slog.LevelInfo
 
@@ -229,7 +229,7 @@ func getConfigForFile(filePath string) *ConfigForAMonitoredFile {
 		slog.Warn("Failed to find configuration for file", "filePath", filePath)
 	}
 
-	return &foundConfig
+	return foundConfig
 }
 
 /*
@@ -330,7 +330,7 @@ func parseCommandArgs() {
 				CounterTopNForKeyedMetrics:   *counterTopNPtr,
 				CounterOutputIntervalSeconds: *counterOutputIntervalPtr}
 
-			globalConfig[cfFromCmdLine.FilePath] = cfFromCmdLine
+			globalConfig[cfFromCmdLine.FilePath] = &cfFromCmdLine
 		} else {
 			fmt.Println("Invalid options, cannot continue, missing log file path. Either a configuration file or command line parameters are required. Use -h parameter to view command line options. See https://github.com/SBOsoft/SBOLogProcessor for more details")
 			os.Exit(1)
@@ -339,73 +339,238 @@ func parseCommandArgs() {
 	}
 }
 
+/*
+TODO should be improved
+First we load the config file into a map[string]map[string]interface{} because we want to know if
+values for were provided for each field or not so that we can override with values defined under defaults
+'interface{}' requires a lot of type conversions float64 => int, []interface{} => []string
+*/
 func loadConfigFromFile(configFileName string) bool {
-	loadedConfigFromFile := false
-	var configLoadedFromFile map[string]ConfigForAMonitoredFile = make(map[string]ConfigForAMonitoredFile)
+	var configLoadedFromFile map[string]map[string]interface{} = make(map[string]map[string]interface{})
 	fileInfo, err := os.Stat(configFileName)
 	if os.IsNotExist(err) {
 		//no config file provided
 		slog.Error("Configuration file path parameter, -c, points to non-existent file. It must point to a json file. Ignoring parameter", "file", configFileName)
-	} else {
-		if fileInfo.IsDir() {
-			slog.Error("Configuration file path parameter, -c, points to a directory. It must point to a json file. Ignoring parameter")
-		} else {
-			configFileBytes, err := os.ReadFile(configFileName)
-			if err != nil {
-				slog.Error("Failed to read configuration file", "file", configFileName, "error", err)
-			} else {
-				err := json.Unmarshal(configFileBytes, &configLoadedFromFile)
-				if err != nil {
-					slog.Error("Failed to load configuration from file", "file", configFileName, "error", err)
-				} else {
-					loadedConfigFromFile = true
-					for fp, conf := range configLoadedFromFile {
-						//validation and defaults
-						if conf.CounterOutputIntervalSeconds < 1 {
-							conf.CounterOutputIntervalSeconds = 30
-						}
-						if conf.CounterTopNForKeyedMetrics < 1 || conf.CounterTopNForKeyedMetrics > 100 {
-							conf.CounterTopNForKeyedMetrics = 10
-						}
-						windowSizeToUse := conf.MetricsWindowSize
-						if conf.MetricsWindowSize < 2 || conf.MetricsWindowSize > 10 {
-							//allow sensible values only
-							windowSizeToUse = 3
-						}
-						globalConfig[fp] = ConfigForAMonitoredFile{
-							Enabled:                      conf.Enabled,
-							FilePath:                     conf.FilePath,
-							Handlers:                     conf.Handlers,
-							StartFrom:                    conf.StartFrom,
-							SkipIfLineMatchesRegex:       conf.SkipIfLineMatchesRegex,
-							Follow:                       conf.Follow,
-							DomainName:                   conf.DomainName,
-							HostId:                       conf.HostId,
-							TimeWindowSizeMinutes:        conf.TimeWindowSizeMinutes,
-							WriteToFileTargetFile:        conf.WriteToFileTargetFile,
-							HandlerInstances:             make(map[string]SBOLogHandlerInterface),
-							WriteMetricsToDb:             conf.WriteMetricsToDb,
-							DbAddress:                    conf.DbAddress,
-							DbUser:                       conf.DbUser,
-							DbPassword:                   conf.DbPassword,
-							DbDatabase:                   conf.DbDatabase,
-							ReplaceExistingMetrics:       conf.ReplaceExistingMetrics,
-							MetricsWindowSize:            windowSizeToUse,
-							CounterTopNForKeyedMetrics:   conf.CounterTopNForKeyedMetrics,
-							CounterOutputIntervalSeconds: conf.CounterOutputIntervalSeconds,
-							SaveLogsToDb:                 conf.SaveLogsToDb,
-							SaveLogsToDbMaskIPs:          conf.SaveLogsToDbMaskIPs,
-							SaveLogsToDbOnlyRelevant:     conf.SaveLogsToDbOnlyRelevant,
-							OSMetricsEnabled:             conf.OSMetricsEnabled,
-							OSMetricsIntervalMinutes:     conf.OSMetricsIntervalMinutes}
+		return false
+	}
 
-					}
-					slog.Debug("Loaded config from file", "file", configFileName)
-				}
+	if fileInfo.IsDir() {
+		slog.Error("Configuration file path parameter, -c, points to a directory. It must point to a json file. Ignoring parameter")
+		return false
+	}
+
+	configFileBytes, err := os.ReadFile(configFileName)
+	if err != nil {
+		slog.Error("Failed to read configuration file", "file", configFileName, "error", err)
+		return false
+	}
+
+	err = json.Unmarshal(configFileBytes, &configLoadedFromFile)
+	if err != nil {
+		slog.Error("Failed to load configuration from file", "file", configFileName, "error", err)
+		return false
+	}
+
+	for fp, conf := range configLoadedFromFile {
+		//validation and defaults
+		mapCounterOutputIntervalSeconds, ok := conf["CounterOutputIntervalSeconds"].(float64)
+		if !ok || mapCounterOutputIntervalSeconds < 1 {
+			mapCounterOutputIntervalSeconds = 30
+		}
+		conf["CounterOutputIntervalSeconds_ok"] = ok
+
+		mapCounterTopNForKeyedMetrics, ok := conf["CounterTopNForKeyedMetrics"].(float64)
+		if !ok || (mapCounterTopNForKeyedMetrics < 1 || mapCounterTopNForKeyedMetrics > 100) {
+			mapCounterTopNForKeyedMetrics = 10
+		}
+		conf["CounterTopNForKeyedMetrics_ok"] = ok
+
+		intMetricsWindowSize, ok := conf["MetricsWindowSize"].(float64)
+		conf["MetricsWindowSize_ok"] = ok
+		windowSizeToUse := 3
+		if ok {
+			windowSizeToUse = int(intMetricsWindowSize)
+		}
+		if !ok || (intMetricsWindowSize < 2 || intMetricsWindowSize > 10) {
+			//allow sensible values only
+			windowSizeToUse = 3
+		}
+		mapEnabled, ok := conf["Enabled"].(bool)
+		conf["Enabled_ok"] = ok
+		mapFilePath, ok := conf["FilePath"].(string)
+		conf["FilePath_ok"] = ok
+		mapHandlers, ok := conf["Handlers"].([]interface{})
+		conf["Handlers_ok"] = ok
+
+		mapStartFrom, ok := conf["StartFrom"].(float64)
+		conf["StartFrom_ok"] = ok
+		mapSkipIfLineMatchesRegex, ok := conf["SkipIfLineMatchesRegex"].(string)
+		conf["SkipIfLineMatchesRegex_ok"] = ok
+		mapFollow, ok := conf["Follow"].(bool)
+		conf["Follow_ok"] = ok
+		mapDomainName, ok := conf["DomainName"].(string)
+		conf["DomainName_ok"] = ok
+		mapHostId, ok := conf["HostId"].(float64)
+		conf["HostId_ok"] = ok
+
+		mapTimeWindowSizeMinutes, ok := conf["TimeWindowSizeMinutes"].(float64)
+		conf["TimeWindowSizeMinutes_ok"] = ok
+		mapWriteToFileTargetFile, ok := conf["WriteToFileTargetFile"].(string)
+		conf["WriteToFileTargetFile_ok"] = ok
+		mapWriteMetricsToDb, ok := conf["WriteMetricsToDb"].(bool)
+		conf["WriteMetricsToDb_ok"] = ok
+		mapDbAddress, ok := conf["DbAddress"].(string)
+		conf["DbAddress_ok"] = ok
+		mapDbUser, ok := conf["DbUser"].(string)
+		conf["DbUser_ok"] = ok
+		mapDbPassword, ok := conf["DbPassword"].(string)
+		conf["DbPassword_ok"] = ok
+		mapDbDatabase, ok := conf["DbDatabase"].(string)
+		conf["DbDatabase_ok"] = ok
+		mapReplaceExistingMetrics, ok := conf["ReplaceExistingMetrics"].(bool)
+		conf["ReplaceExistingMetrics_ok"] = ok
+
+		mapSaveLogsToDb, ok := conf["SaveLogsToDb"].(bool)
+		conf["SaveLogsToDb_ok"] = ok
+		mapSaveLogsToDbMaskIPs, ok := conf["SaveLogsToDbMaskIPs"].(bool)
+		conf["SaveLogsToDbMaskIPs_ok"] = ok
+		mapSaveLogsToDbOnlyRelevant, ok := conf["SaveLogsToDbOnlyRelevant"].(float64)
+		conf["SaveLogsToDbOnlyRelevant_ok"] = ok
+		mapOSMetricsEnabled, ok := conf["OSMetricsEnabled"].(bool)
+		conf["OSMetricsEnabled_ok"] = ok
+		mapOSMetricsIntervalMinutes, ok := conf["OSMetricsIntervalMinutes"].(float64)
+		conf["OSMetricsIntervalMinutes_ok"] = ok
+
+		handlersArrayAsStrings := make([]string, len(mapHandlers))
+		for indexInHandlers, handlerNameValue := range mapHandlers {
+			handlersArrayAsStrings[indexInHandlers] = fmt.Sprint(handlerNameValue)
+		}
+		globalConfig[fp] = &ConfigForAMonitoredFile{
+			Enabled:                      mapEnabled,
+			FilePath:                     mapFilePath,
+			Handlers:                     handlersArrayAsStrings,
+			StartFrom:                    int(mapStartFrom),
+			SkipIfLineMatchesRegex:       mapSkipIfLineMatchesRegex,
+			Follow:                       mapFollow,
+			DomainName:                   mapDomainName,
+			HostId:                       int(mapHostId),
+			TimeWindowSizeMinutes:        int(mapTimeWindowSizeMinutes),
+			WriteToFileTargetFile:        mapWriteToFileTargetFile,
+			HandlerInstances:             make(map[string]SBOLogHandlerInterface),
+			WriteMetricsToDb:             mapWriteMetricsToDb,
+			DbAddress:                    mapDbAddress,
+			DbUser:                       mapDbUser,
+			DbPassword:                   mapDbPassword,
+			DbDatabase:                   mapDbDatabase,
+			ReplaceExistingMetrics:       mapReplaceExistingMetrics,
+			MetricsWindowSize:            windowSizeToUse,
+			CounterTopNForKeyedMetrics:   int(mapCounterTopNForKeyedMetrics),
+			CounterOutputIntervalSeconds: int(mapCounterOutputIntervalSeconds),
+			SaveLogsToDb:                 mapSaveLogsToDb,
+			SaveLogsToDbMaskIPs:          mapSaveLogsToDbMaskIPs,
+			SaveLogsToDbOnlyRelevant:     int(mapSaveLogsToDbOnlyRelevant),
+			OSMetricsEnabled:             mapOSMetricsEnabled,
+			OSMetricsIntervalMinutes:     int(mapOSMetricsIntervalMinutes)}
+
+	}
+	_, configContainsDefaultEntry := globalConfig[DEFAULT_CONFIG_KEY]
+	if configContainsDefaultEntry {
+		for filePath, _ := range globalConfig {
+			if filePath == DEFAULT_CONFIG_KEY || filePath == OSMETRICS_CONFIG_KEY {
+				continue
+			}
+			if !configLoadedFromFile[filePath]["Handlers_ok"].(bool) && len(globalConfig[filePath].Handlers) < 1 {
+				globalConfig[filePath].Handlers = globalConfig[DEFAULT_CONFIG_KEY].Handlers
+			}
+			if !configLoadedFromFile[filePath]["StartFrom_ok"].(bool) {
+				globalConfig[filePath].StartFrom = globalConfig[DEFAULT_CONFIG_KEY].StartFrom
+			}
+			if !configLoadedFromFile[filePath]["SkipIfLineMatchesRegex_ok"].(bool) {
+				globalConfig[filePath].SkipIfLineMatchesRegex = globalConfig[DEFAULT_CONFIG_KEY].SkipIfLineMatchesRegex
+			}
+
+			if !configLoadedFromFile[filePath]["Follow_ok"].(bool) {
+				globalConfig[filePath].Follow = globalConfig[DEFAULT_CONFIG_KEY].Follow
+			}
+			if !configLoadedFromFile[filePath]["DomainName_ok"].(bool) {
+				globalConfig[filePath].DomainName = globalConfig[DEFAULT_CONFIG_KEY].DomainName
+			}
+			if !configLoadedFromFile[filePath]["HostId_ok"].(bool) {
+				globalConfig[filePath].HostId = globalConfig[DEFAULT_CONFIG_KEY].HostId
+			}
+			if !configLoadedFromFile[filePath]["TimeWindowSizeMinutes_ok"].(bool) {
+				globalConfig[filePath].TimeWindowSizeMinutes = globalConfig[DEFAULT_CONFIG_KEY].TimeWindowSizeMinutes
+			}
+			if !configLoadedFromFile[filePath]["WriteToFileTargetFile_ok"].(bool) {
+				globalConfig[filePath].WriteToFileTargetFile = globalConfig[DEFAULT_CONFIG_KEY].WriteToFileTargetFile
+			}
+
+			if !configLoadedFromFile[filePath]["WriteMetricsToDb_ok"].(bool) {
+				globalConfig[filePath].WriteMetricsToDb = globalConfig[DEFAULT_CONFIG_KEY].WriteMetricsToDb
+			}
+			if !configLoadedFromFile[filePath]["DbAddress_ok"].(bool) {
+				globalConfig[filePath].DbAddress = globalConfig[DEFAULT_CONFIG_KEY].DbAddress
+			}
+			if !configLoadedFromFile[filePath]["DbUser_ok"].(bool) {
+				globalConfig[filePath].DbUser = globalConfig[DEFAULT_CONFIG_KEY].DbUser
+			}
+			if !configLoadedFromFile[filePath]["DbPassword_ok"].(bool) {
+				globalConfig[filePath].DbPassword = globalConfig[DEFAULT_CONFIG_KEY].DbPassword
+			}
+			if !configLoadedFromFile[filePath]["DbDatabase_ok"].(bool) {
+				globalConfig[filePath].DbDatabase = globalConfig[DEFAULT_CONFIG_KEY].DbDatabase
+			}
+			if !configLoadedFromFile[filePath]["ReplaceExistingMetrics_ok"].(bool) {
+				globalConfig[filePath].ReplaceExistingMetrics = globalConfig[DEFAULT_CONFIG_KEY].ReplaceExistingMetrics
+			}
+			if !configLoadedFromFile[filePath]["MetricsWindowSize_ok"].(bool) {
+				globalConfig[filePath].MetricsWindowSize = globalConfig[DEFAULT_CONFIG_KEY].MetricsWindowSize
+			}
+			if !configLoadedFromFile[filePath]["CounterTopNForKeyedMetrics_ok"].(bool) {
+				globalConfig[filePath].CounterTopNForKeyedMetrics = globalConfig[DEFAULT_CONFIG_KEY].CounterTopNForKeyedMetrics
+			}
+			if !configLoadedFromFile[filePath]["CounterOutputIntervalSeconds_ok"].(bool) {
+				globalConfig[filePath].CounterOutputIntervalSeconds = globalConfig[DEFAULT_CONFIG_KEY].CounterOutputIntervalSeconds
+			}
+			if !configLoadedFromFile[filePath]["SaveLogsToDb_ok"].(bool) {
+				globalConfig[filePath].SaveLogsToDb = globalConfig[DEFAULT_CONFIG_KEY].SaveLogsToDb
+			}
+			if !configLoadedFromFile[filePath]["SaveLogsToDbMaskIPs_ok"].(bool) {
+				globalConfig[filePath].SaveLogsToDbMaskIPs = globalConfig[DEFAULT_CONFIG_KEY].SaveLogsToDbMaskIPs
+			}
+			if !configLoadedFromFile[filePath]["SaveLogsToDbOnlyRelevant_ok"].(bool) {
+				globalConfig[filePath].SaveLogsToDbOnlyRelevant = globalConfig[DEFAULT_CONFIG_KEY].SaveLogsToDbOnlyRelevant
+			}
+			if !configLoadedFromFile[filePath]["OSMetricsEnabled_ok"].(bool) {
+				globalConfig[filePath].OSMetricsEnabled = globalConfig[DEFAULT_CONFIG_KEY].OSMetricsEnabled
+			}
+			if !configLoadedFromFile[filePath]["OSMetricsIntervalMinutes_ok"].(bool) {
+				globalConfig[filePath].OSMetricsIntervalMinutes = globalConfig[DEFAULT_CONFIG_KEY].OSMetricsIntervalMinutes
+			}
+		}
+
+		_, ok := globalConfig[OSMETRICS_CONFIG_KEY]
+		if ok {
+			if len(globalConfig[OSMETRICS_CONFIG_KEY].DbAddress) < 1 {
+				globalConfig[OSMETRICS_CONFIG_KEY].DbAddress = globalConfig[DEFAULT_CONFIG_KEY].DbAddress
+			}
+			if len(globalConfig[OSMETRICS_CONFIG_KEY].DbDatabase) < 1 {
+				globalConfig[OSMETRICS_CONFIG_KEY].DbDatabase = globalConfig[DEFAULT_CONFIG_KEY].DbDatabase
+			}
+			if len(globalConfig[OSMETRICS_CONFIG_KEY].DbPassword) < 1 {
+				globalConfig[OSMETRICS_CONFIG_KEY].DbPassword = globalConfig[DEFAULT_CONFIG_KEY].DbPassword
+			}
+			if len(globalConfig[OSMETRICS_CONFIG_KEY].DbUser) < 1 {
+				globalConfig[OSMETRICS_CONFIG_KEY].DbUser = globalConfig[DEFAULT_CONFIG_KEY].DbUser
+			}
+			if globalConfig[OSMETRICS_CONFIG_KEY].HostId < 1 {
+				globalConfig[OSMETRICS_CONFIG_KEY].HostId = globalConfig[DEFAULT_CONFIG_KEY].HostId
 			}
 		}
 	}
-	return loadedConfigFromFile
+
+	slog.Debug("Loaded config from file", "file", configFileName)
+	return true
 }
 
 func createHandler(filePath string, handlerName string, dataToSaveChan chan *metrics.SBOMetricWindowDataToBeSaved, metricsManager *metrics.SBOMetricsManager) SBOLogHandlerInterface {
