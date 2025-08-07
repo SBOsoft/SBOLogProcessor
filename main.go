@@ -51,7 +51,11 @@ const (
 	SBO_LOGP_LOG_FILE string = "./sbologp-logs.log"
 )
 
+// default settings that apply to all files unless there is a file specific config entry
 const DEFAULT_CONFIG_KEY string = "--default--"
+
+// there may be an entry with this name in the config file
+const OSMETRICS_CONFIG_KEY string = "--OS-metrics--"
 
 var globalConfig map[string]ConfigForAMonitoredFile = make(map[string]ConfigForAMonitoredFile)
 var globalActiveProfile string = SBO_GLOBAL_PROFILE_METRICS
@@ -77,12 +81,142 @@ func main() {
 	var wg sync.WaitGroup
 
 	for filePath, _ := range globalConfig {
+		if filePath == DEFAULT_CONFIG_KEY {
+			//do nothing. this is not a real file, just a default config entry
+			continue
+		}
+		if filePath == OSMETRICS_CONFIG_KEY {
+			//not a real file. setup OS metrics collection and continue
+			wg.Add(1)
+			go setupOSMetricsCollection(&wg)
+			continue
+		}
 		wg.Add(1)
 		go processFile(filePath, &wg)
 	}
 
 	wg.Wait()
 
+}
+
+func setupOSMetricsCollection(wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	now := time.Now()
+	currentMinute := now.Minute()
+
+	//Find the next target minute. We want to start OS metrics collection on the scheduled minute
+	// e.g if you want to collect metrics at 0, 10, 20, 30, 40, 50, 60 minutes and the process was started at 07:33
+	// we will wait for 2 minutes 27 seconds and start at 10:00
+	var metricsRunInterval int = 0
+	nextTargetMinute := 0
+	switch globalConfig[OSMETRICS_CONFIG_KEY].OSMetricsIntervalMinutes {
+	case 1:
+		nextTargetMinute = currentMinute + 1
+		metricsRunInterval = 1
+	case 5:
+		//must end with 0 or 5
+		if currentMinute%10 == 0 {
+			nextTargetMinute = currentMinute
+		} else if currentMinute%10 > 5 {
+			nextTargetMinute = currentMinute + (10 - (currentMinute % 10))
+		} else {
+			nextTargetMinute = currentMinute + (5 - (currentMinute % 10))
+		}
+		metricsRunInterval = 5
+	case 15:
+		//must end with one of 00 15 30 45
+		if currentMinute > 45 {
+			nextTargetMinute = 60
+		} else if currentMinute > 30 {
+			nextTargetMinute = 45
+		} else if currentMinute > 15 {
+			nextTargetMinute = 30
+		} else if currentMinute > 0 {
+			nextTargetMinute = 15
+		} else {
+			nextTargetMinute = 0
+		}
+		metricsRunInterval = 15
+	case 30:
+		//must end with 00 or 30
+		if currentMinute > 30 {
+			nextTargetMinute = 60
+		} else {
+			nextTargetMinute = 30
+		}
+		metricsRunInterval = 30
+	case 60:
+		//must end with 00
+		nextTargetMinute = 60
+		metricsRunInterval = 60
+	default: //default is 10. time window  must end with one of 00, 10, 20, 30, 40, 50
+		//must end with 0 or 5
+		if currentMinute%10 == 0 {
+			nextTargetMinute = currentMinute
+		} else {
+			nextTargetMinute = currentMinute + (10 - (currentMinute % 10))
+		}
+		metricsRunInterval = 10
+	}
+
+	// Calculate the time to the next target minute
+	nextRunTime := time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), nextTargetMinute, 0, 0, now.Location())
+
+	initialDelay := nextRunTime.Sub(now)
+
+	if initialDelay > 0 {
+		slog.Info("Will start OS metrics collection at", "time", nextRunTime, "initialDelay", initialDelay.Round(time.Second))
+		// Wait for the initial delay
+		time.Sleep(initialDelay)
+	}
+
+	//db conn
+	sbodb := db.NewSBOAnalyticsDB()
+
+	dbInitialized, err := sbodb.Init(globalConfig[OSMETRICS_CONFIG_KEY].DbUser, globalConfig[OSMETRICS_CONFIG_KEY].DbPassword, globalConfig[OSMETRICS_CONFIG_KEY].DbAddress, globalConfig[OSMETRICS_CONFIG_KEY].DbDatabase)
+	if !dbInitialized {
+		slog.Warn("Failed to initialize database connection for OS metrics. Check database settings for OS metrics entry with key "+OSMETRICS_CONFIG_KEY+" in the configuration file", "error", err)
+		return
+	}
+
+	defer sbodb.Close()
+
+	// Run the function immediately after the initial delay
+	slog.Debug("Start OS metrics initial run")
+	if !processOSMetrics(sbodb, true) {
+		//if it didn't work on the first attempt it's probably not necessary to try again, e.g it's an unsupported OS
+		slog.Warn("NOT starting OS metrics collection. Initial attempt failed and won't try again. See supported operating systems in documentation")
+		return
+	}
+
+	// Set up a ticker to run every metricsRunInterval minutes
+	ticker := time.NewTicker(time.Duration(metricsRunInterval) * time.Minute)
+	defer ticker.Stop() // Ensure the ticker is stopped when func exits
+
+	for range ticker.C {
+		slog.Debug("Collecting OS metrics in scheduled task")
+		processOSMetrics(sbodb, false)
+	}
+
+}
+
+func processOSMetrics(sbodb *db.SBOAnalyticsDB, isInitialCall bool) bool {
+	uptimeInfo, err := metrics.GetOSUptimeInfo()
+
+	if err != nil {
+		slog.Warn("Failed to collect OS uptime info. This feature is not available on all platforms. Check supported operating systems.", "error", err)
+		return false
+	}
+
+	memoryInfo, err := metrics.GetOSMemoryInfo()
+	if err != nil && isInitialCall { //don't repeat the same log message forever, log only the first time
+		slog.Warn("Failed to collect OS memory info. This feature is not available on all platforms. Check supported operating systems.", "error", err)
+		//not returning false as at least uptime worked
+		//return false
+	}
+	saveResult, _ := sbodb.SaveOSMetrics(uptimeInfo, memoryInfo, globalConfig[OSMETRICS_CONFIG_KEY].HostId)
+	return saveResult
 }
 
 func getConfigForFile(filePath string) *ConfigForAMonitoredFile {
@@ -261,7 +395,9 @@ func loadConfigFromFile(configFileName string) bool {
 							CounterOutputIntervalSeconds: conf.CounterOutputIntervalSeconds,
 							SaveLogsToDb:                 conf.SaveLogsToDb,
 							SaveLogsToDbMaskIPs:          conf.SaveLogsToDbMaskIPs,
-							SaveLogsToDbOnlyRelevant:     conf.SaveLogsToDbOnlyRelevant}
+							SaveLogsToDbOnlyRelevant:     conf.SaveLogsToDbOnlyRelevant,
+							OSMetricsEnabled:             conf.OSMetricsEnabled,
+							OSMetricsIntervalMinutes:     conf.OSMetricsIntervalMinutes}
 
 					}
 					slog.Debug("Loaded config from file", "file", configFileName)
@@ -300,6 +436,8 @@ func createHandler(filePath string, handlerName string, dataToSaveChan chan *met
 
 func processFile(filePath string, parentWaitGroup *sync.WaitGroup) {
 	defer parentWaitGroup.Done()
+	slog.Info("Starting to process file", "file", filePath)
+
 	config := getConfigForFile(filePath)
 	lines := make(chan string, 10) // Buffered channel to prevent blocking
 	dataToBeSavedChannel := make(chan *metrics.SBOMetricWindowDataToBeSaved, 100)
@@ -730,10 +868,12 @@ type ConfigForAMonitoredFile struct {
 	WriteToFileTargetFile string
 	HandlerInstances      map[string]SBOLogHandlerInterface
 	WriteMetricsToDb      bool
-	DbAddress             string
-	DbUser                string
-	DbPassword            string
-	DbDatabase            string
+	//Required when WriteMetricsToDb or OSMetricsEnabled are used
+	//to save OS metrics define an entry under OSMETRICS_CONFIG_KEY
+	DbAddress  string
+	DbUser     string
+	DbPassword string
+	DbDatabase string
 	//when true then if a metric entry already exists the will be replaced,
 	// when false then if a metric entry already exists then the value will be added to the existing value
 	ReplaceExistingMetrics bool
@@ -754,6 +894,12 @@ type ConfigForAMonitoredFile struct {
 	//when 1 requests from bots, scanners, 30x, 40x etc will be skipped. when 0 all logs will be saved into the database
 	//other values MAY be added in the future so you must treat it as an enum, which supports only 0 and 1 for the time being
 	SaveLogsToDbOnlyRelevant int
+
+	//Enable OS metrics collection. Ignored for individual files and can be configured only under OSMETRICS_CONFIG_KEY
+	OSMetricsEnabled bool
+	//OS metrics collection minutes. Only the following specific values are supported: Other values will be ignored. Defaults to 10
+	// supported values: 1, 5, 10, 15, 30, 60
+	OSMetricsIntervalMinutes int
 }
 
 /*

@@ -20,5 +20,27 @@
         "SaveLogsToDb": true,
         "SaveLogsToDbMaskIPs": true,
         "SaveLogsToDbOnlyRelevant": 1        
+    },
+    "/var/log/apache2/access.log": {
+        "Enabled": true,
+        "FilePath": "/var/log/apache2/access.log",
+        "Handlers": [
+            "METRICS"
+        ],
+        "StartFrom": -1,
+        "Follow": true,
+        "DomainName": "CHANGE_THIS.example.com",
+        "HostId": 1,
+        "ReplaceExistingMetrics":true,
+        "SaveLogsToDbOnlyRelevant": 0
+    },
+    "--OS-metrics--": {
+        "OSMetricsEnabled": true,
+        "OSMetricsIntervalMinutes": 5,
+        "HostId": 1,
+        "DbAddress":"CHANGE_THIS-database-address",
+        "DbUser":"CHANGE_THIS-database-user",
+        "DbPassword":"CHANGE_THIS-password-for-the-database-user",
+        "DbDatabase":"CHANGE_THIS-database-name"
     }
 }

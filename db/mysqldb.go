@@ -22,6 +22,7 @@ package db
 import (
 	"database/sql"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 
 	"github.com/go-sql-driver/mysql"
@@ -75,6 +76,11 @@ func (sboadb *SBOAnalyticsDB) Init(dbUser string, dbPassword string, dbAddress s
 }
 
 func (sboadb *SBOAnalyticsDB) Close() (bool, error) {
+	if sboadb.DbInstance == nil {
+		stackTrace := debug.Stack()
+		slog.Warn("Trying to close an invalid database connection", "stackTrace", string(stackTrace))
+		return false, nil
+	}
 	err := sboadb.DbInstance.Close()
 	if err != nil {
 		return false, err
@@ -221,4 +227,33 @@ func ReduceToMaxColumnLen(str string, colSize int) string {
 	}
 	//TODO assuming ASCII, add unicode support
 	return str[:colSize]
+}
+
+func (sboadb *SBOAnalyticsDB) SaveOSMetrics(uptimeInfo *metrics.UptimeInfo, memoryInfo *metrics.MemoryInfo, hostId int) (bool, error) {
+	var sql string = "INSERT INTO sbo_os_metrics (host_id, metrics_ts, up_duration_minutes, users, " +
+		" load_average1, load_average5, load_average15, " +
+		" swap_use, cache_use, memory_use, memory_free) " +
+		" VALUES (?, now(), ?, ?, " +
+		" ?, ?, ?, " +
+		" ?, ?, ?, ?) "
+	var swapUse int64 = 0
+	var cacheUse int64 = 0
+	var memUse int64 = 0
+	var memFree int64 = 0
+	//memoryInfo may be nil
+	if memoryInfo != nil {
+		swapUse = memoryInfo.SwapUse
+		cacheUse = memoryInfo.CachUse
+		memUse = memoryInfo.MemUse
+		memFree = memoryInfo.MemFree
+	}
+	_, err := sboadb.DbInstance.Exec(sql, hostId, uptimeInfo.UpDurationMinutes, uptimeInfo.Users,
+		uptimeInfo.LoadAverage1, uptimeInfo.LoadAverage5, uptimeInfo.LoadAverage15,
+		swapUse, cacheUse, memUse, memFree)
+	if err != nil {
+		slog.Error("SaveOSMetrics failed", "hostId", hostId, "uptimeInfo", uptimeInfo, "memoryInfo", memoryInfo, "error", err)
+		return false, err
+	} else {
+		return true, nil
+	}
 }

@@ -1,0 +1,11 @@
+{
+    "--OS-metrics--": {
+        "OSMetricsEnabled": true,
+        "OSMetricsIntervalMinutes": 5,
+        "HostId": 1,
+        "DbAddress":"CHANGE_THIS-database-address",
+        "DbUser":"CHANGE_THIS-database-user",
+        "DbPassword":"CHANGE_THIS-password-for-the-database-user",
+        "DbDatabase":"CHANGE_THIS-database-name"
+    }
+}
