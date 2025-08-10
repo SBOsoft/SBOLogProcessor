@@ -19,14 +19,14 @@ A database is not required for counter mode.
 Database set up scripts can be found at https://github.com/SBOsoft/SBOanalytics/tree/main/db. There are multiple database script files named 
 using yyyymmddxxxx format, for example 202507210001-some-descriptive-name.sql, where xxxx part is typically 0001. 
 
-During the initial set up you must run all files in alphabetical order. 
+During the initial set up, if you are setting up the database for the first time, you just need to create a database (or use an existing database, all tables have sbo_ prefix) and only run https://github.com/SBOsoft/SBOanalytics/blob/main/db/db-for-new-installations.sql. 
+Files under https://github.com/SBOsoft/SBOanalytics/tree/main/db/upgrades are only needed for upgrades.
 
-During upgrades only run files that were added after the last time you updated your database. Both SBOLogProcessor and SBOanalytics 
-use version numbers following yyyy.mm.dd.xxxx pattern, e.g 2025.07.11.0001. You can find your current version number in version.txt files in
-both SBOLogProcessor and SBOanalytics packages.
+During upgrades only run files under https://github.com/SBOsoft/SBOanalytics/tree/main/db/upgrades that were added after the last time you updated your database. Both 
+SBOLogProcessor and SBOanalytics use version numbers following yyyy.mm.dd.xxxx pattern, e.g 2025.07.11.0001. You can find your current version number in version.txt files in both SBOLogProcessor and SBOanalytics packages.
 
-So if your current version is 2025.07.15.0001 and want to upgrade to 2025.07.25.0001 then you must run database scripts created 
-after 202507150001. 
+So if your current version is 2025.07.15.0001 and want to upgrade to 2025.07.25.0001 then you must run database scripts  with file names
+after 20250715. 
 
 **You MUST always run sql files in alphabetical order.**
 
