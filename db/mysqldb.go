@@ -205,7 +205,7 @@ func (sboadb *SBOAnalyticsDB) SaveRawLog(data *logparsers.SBOHttpRequestLog, dom
 			data.Status, data.BytesSent,
 			ReduceToMaxColumnLen(data.Referer, 100),
 			data.Malicious,
-			ReduceToMaxColumnLen(data.UserAgent.FullName, 100),
+			ReduceToMaxColumnLenKeepingLastPart(data.UserAgent.FullName, 100),
 			ReduceToMaxColumnLen(data.UserAgent.OS, 20),
 			ReduceToMaxColumnLen(data.UserAgent.Family, 20),
 			ReduceToMaxColumnLen(data.UserAgent.DeviceType, 20),
@@ -227,6 +227,14 @@ func ReduceToMaxColumnLen(str string, colSize int) string {
 	}
 	//TODO assuming ASCII, add unicode support
 	return str[:colSize]
+}
+
+func ReduceToMaxColumnLenKeepingLastPart(str string, colSize int) string {
+	if len(str) <= colSize {
+		return str
+	}
+	//TODO assuming ASCII, add unicode support
+	return str[(len(str) - colSize):]
 }
 
 func (sboadb *SBOAnalyticsDB) SaveOSMetrics(uptimeInfo *metrics.UptimeInfo, memoryInfo *metrics.MemoryInfo, hostId int) (bool, error) {
