@@ -143,20 +143,31 @@ func TestParseUptimeOutputUbuntu2(t *testing.T) {
 
 }
 
-func TestParseFreeMinusLOutputUbuntu(t *testing.T) {
+func TestParseFreeOutputUbuntu(t *testing.T) {
 
-	freeOutput := "SwapUse           0 CachUse     2104792  MemUse     1132692 MemFree     5213936"
-	memInfo := ParseFreeOutput(freeOutput)
+	freeOutput := `               total        used        free      shared  buff/cache   available
+Mem:         8131912     1142280     5147464        4044     2163520     6989632
+Swap:              0           0           0`
+	memInfo, err := ParseFreeOutput(freeOutput)
+	if err != nil {
+		t.Error("Unexpected error", err)
+		return
+	}
 
-	if memInfo.CachUse != 2104792 {
+	if memInfo.CachUse != 2163520 {
 		t.Error("Unexpected CachUse value", memInfo.CachUse)
 	}
-	if memInfo.MemFree != 5213936 {
+	if memInfo.MemFree != 5147464 {
 		t.Error("Unexpected MemFree value", memInfo.MemFree)
 	}
-	if memInfo.MemUse != 1132692 {
+	if memInfo.MemUse != 1142280 {
 		t.Error("Unexpected MemUse value", memInfo.MemUse)
 	}
+
+	if memInfo.MemAvailable != 6989632 {
+		t.Error("Unexpected MemAvailable value", memInfo.MemAvailable)
+	}
+
 	if memInfo.SwapUse != 0 {
 		t.Error("Unexpected SwapUse value", memInfo.SwapUse)
 	}

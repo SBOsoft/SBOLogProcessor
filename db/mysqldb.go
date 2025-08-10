@@ -232,24 +232,26 @@ func ReduceToMaxColumnLen(str string, colSize int) string {
 func (sboadb *SBOAnalyticsDB) SaveOSMetrics(uptimeInfo *metrics.UptimeInfo, memoryInfo *metrics.MemoryInfo, hostId int) (bool, error) {
 	var sql string = "INSERT INTO sbo_os_metrics (host_id, metrics_ts, up_duration_minutes, users, " +
 		" load_average1, load_average5, load_average15, " +
-		" swap_use, cache_use, memory_use, memory_free) " +
+		" swap_use, cache_use, memory_use, memory_free, memory_available) " +
 		" VALUES (?, now(), ?, ?, " +
 		" ?, ?, ?, " +
-		" ?, ?, ?, ?) "
+		" ?, ?, ?, ?, ?) "
 	var swapUse int64 = 0
 	var cacheUse int64 = 0
 	var memUse int64 = 0
 	var memFree int64 = 0
+	var memAvailable int64 = 0
 	//memoryInfo may be nil
 	if memoryInfo != nil {
 		swapUse = memoryInfo.SwapUse
 		cacheUse = memoryInfo.CachUse
 		memUse = memoryInfo.MemUse
 		memFree = memoryInfo.MemFree
+		memAvailable = memoryInfo.MemAvailable
 	}
 	_, err := sboadb.DbInstance.Exec(sql, hostId, uptimeInfo.UpDurationMinutes, uptimeInfo.Users,
 		uptimeInfo.LoadAverage1, uptimeInfo.LoadAverage5, uptimeInfo.LoadAverage15,
-		swapUse, cacheUse, memUse, memFree)
+		swapUse, cacheUse, memUse, memFree, memAvailable)
 	if err != nil {
 		slog.Error("SaveOSMetrics failed", "hostId", hostId, "uptimeInfo", uptimeInfo, "memoryInfo", memoryInfo, "error", err)
 		return false, err

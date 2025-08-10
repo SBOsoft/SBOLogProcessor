@@ -40,12 +40,13 @@ type UptimeInfo struct {
 	LoadAverage15     string // 15-minute load average
 }
 
-// free -L output
+// free output
 type MemoryInfo struct {
-	SwapUse int64
-	CachUse int64
-	MemUse  int64
-	MemFree int64
+	SwapUse      int64
+	CachUse      int64
+	MemUse       int64
+	MemFree      int64
+	MemAvailable int64
 }
 
 // GetOSUptimeInfo executes the 'uptime' command and parses its output.
@@ -115,32 +116,44 @@ func ParseUptimeOutput(uptimeStr string) *UptimeInfo {
 }
 
 func GetOSMemoryInfo() (*MemoryInfo, error) {
-	// Execute the 'uptime' command
-	cmd := exec.Command("free -L")
+	// Execute the linux 'free' command. Not available on other environments
+	cmd := exec.Command("free")
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("failed to execute 'free -L' command: %w", err)
+		return nil, fmt.Errorf("failed to execute 'free' command: %w", err)
 	}
 
 	freeStr := strings.TrimSpace(string(output))
-	slog.Debug("Command output", "free -L", freeStr)
-	info := ParseFreeOutput(freeStr)
-	return info, nil
+	slog.Debug("Command output", "free", freeStr)
+	info, err := ParseFreeOutput(freeStr)
+	return info, err
 }
 
-func ParseFreeOutput(freeOutput string) *MemoryInfo {
-	//SwapUse           0 CachUse     2104792  MemUse     1132692 MemFree     5213936
-	freeLRe := regexp.MustCompile(`SwapUse\s*(\d+)\s*CachUse\s*(\d+)\s*MemUse\s*(\d+)\s*MemFree\s*(\d+)\s*`)
+func ParseFreeOutput(freeOutput string) (*MemoryInfo, error) {
+	/*
+	   	               total        used        free      shared  buff/cache   available
+	   Mem:         8131912     1142280     5147464        4044     2163520     6989632
+	   Swap:              0           0           0
+	*/
+	splitFree := strings.Split(freeOutput, "\n")
+	if len(splitFree) < 3 {
+		return nil, fmt.Errorf("'free' output does not match expected format")
+	}
+	var memTotal, memUsed, memFree, memShared, memBuffCache, memAvailable int64
+	var labelToDiscard string
+	fmt.Sscanf(splitFree[1], "%s %d %d %d %d %d %d", &labelToDiscard, &memTotal, &memUsed, &memFree, &memShared, &memBuffCache, &memAvailable)
 
-	matches := freeLRe.FindStringSubmatch(freeOutput)
+	var swapTotal, swapUsed, swapFree int64
+
+	fmt.Sscanf(splitFree[2], "%s %d %d %d", &swapTotal, &swapUsed, &swapFree)
 
 	info := &MemoryInfo{}
-	if len(matches) > 1 {
-		info.SwapUse, _ = strconv.ParseInt(matches[1], 10, 64)
-		info.CachUse, _ = strconv.ParseInt(matches[2], 10, 64)
-		info.MemUse, _ = strconv.ParseInt(matches[3], 10, 64)
-		info.MemFree, _ = strconv.ParseInt(matches[4], 10, 64)
-	}
 
-	return info
+	info.SwapUse = swapUsed
+	info.CachUse = memBuffCache
+	info.MemUse = memUsed
+	info.MemFree = memFree
+	info.MemAvailable = memAvailable
+
+	return info, nil
 }
