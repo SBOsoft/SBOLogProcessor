@@ -3,18 +3,18 @@ Access Log Processor and Metrics Generator
 
 There are 3 main use cases supported by this tool:
 
- 1. Counter mode: Count logs from an access log file and print statistics to stdout every 30 seconds.  For example, running `sbologp -p count /var/log/apache2/example.com-access.log` will print stats from /var/log/apache2/example.com-access.log file every 30 seconds.
- 2. Metrics generator mode: Process logs from an access log file (or files) and generates metrics, which can be saved into a mysql database to be used with [SBOanalytics](https://github.com/SBOsoft/SBOanalytics) (web front-end for metrics) or just printed to stdout. 
- Processed (and optionally filtered) logs can be pushed to a mysql server, later to be viewed using SBOanalytics. Besides web server metrics, it can capture host metrics such as cpu and memory and save them to the mysql database as well.
+ 1. Counter mode: Count logs from an access log file and print statistics to stdout every 30 seconds.  For example, running `sbologp -f -p count /var/log/apache2/example.com-access.log` will print stats from /var/log/apache2/example.com-access.log file every 30 seconds.
+ 2. Metrics generator mode: Process logs from an access log file (or files) and generate metrics, which can be saved into a mysql database to be used with [SBOanalytics](https://github.com/SBOsoft/SBOanalytics) (web front-end for metrics) or just printed to stdout. 
+ Processed (and optionally filtered) logs can be pushed to a mysql server, later to be viewed using SBOanalytics. Besides web server metrics, it can capture host metrics such as cpu and memory usage and save them into the mysql database as well.
  3. Security mode: (**Not implemented yet**) Process logs from an access log file and output potential security issues (e.g abuser, stats on sql injection attempts etc) giving you a list of IPs and/or patterns that you may want to block
 
 # Usage
-This is a command line tool without a user interface.
+This is a command line tool without a user interface. This tool is intended for mainly linux environments and other environments are not tested in detail, use at your own risk on other environments. 
 
 ## Database configuration
 If you want to save metrics and logs into a database, i.e to be used with SBOanalytics, then you must set up a mysql database
 before running this tool.
-A database is not required for counter mode.
+A database is **not** required for counter mode.
 
 Database set up scripts can be found at https://github.com/SBOsoft/SBOanalytics/tree/main/db. There are multiple database script files named 
 using yyyymmddxxxx format, for example 202507210001-some-descriptive-name.sql, where xxxx part is typically 0001. 
@@ -37,7 +37,7 @@ Download a precompiled binary from [releases](https://github.com/SBOsoft/SBOLogP
 
 Run `sbologp -h` to see available command line options.
 
-There are too many options which may not have a corresponding command line parameter, passing a configuration file using -c option is required when generating metrics.
+There are too many options which may not have a corresponding command line parameter, passing a configuration file using -c option is **required** when generating metrics and might be necessary for other modes too.
 
 See https://github.com/SBOsoft/SBOLogProcessor/tree/main/conf/ for example configurations. Normally copying a configuration example  and modifying it to meet your needs and then running the application using `-c` option should suffice. 
 
