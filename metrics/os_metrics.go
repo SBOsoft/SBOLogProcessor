@@ -65,26 +65,40 @@ func GetOSUptimeInfo() (*UptimeInfo, error) {
 	return info, nil
 }
 
+// Compiled once; these are used by ParseUptimeOutput which may run periodically.
+var (
+	reUptimeTime      = regexp.MustCompile(`^\s*(\d{2}:\d{2}(:\d{2})?)`)
+	reUptimeDuration  = regexp.MustCompile(`up\s+(.*),\s*(\d+)\s+users?`) // `.*` is non-greedy in context
+	reUptimeDaysHours = regexp.MustCompile(`(\d+).*?,\s*(\d{1,2}):(\d{2})`)
+	reUptimeHourMin   = regexp.MustCompile(`(\d{1,2}):(\d{2})`)
+	reUptimeLoadAvg   = regexp.MustCompile(`load averages?\s*:\s*(\d+\.\d+)[,\s]\s*(\d+\.\d+)[,\s]\s*(\d+\.\d+)`)
+)
+
 // parse a given uptime output as string
 func ParseUptimeOutput(uptimeStr string) *UptimeInfo {
 
 	info := &UptimeInfo{}
 
-	timeRe := regexp.MustCompile(`^\s*(\d{2}:\d{2}(:\d{2})?)`)
-	if match := timeRe.FindStringSubmatch(uptimeStr); len(match) > 1 {
+	if match := reUptimeTime.FindStringSubmatch(uptimeStr); len(match) > 1 {
 		info.CurrentTime = match[1]
 	} else {
 		// Fallback: Use current system time if uptime output format is unexpected ??
 		info.CurrentTime = time.Now().Format("15:04:05")
 	}
 
-	// The `.*?` makes the matching non-greedy.
-	re := regexp.MustCompile(`up\s+(.*),\s*(\d+)\s+users?`)
+	durationAndUsersMatches := reUptimeDuration.FindStringSubmatch(uptimeStr)
+	if len(durationAndUsersMatches) < 3 {
+		// Unexpected uptime output (unknown OS/locale/format). Return what we have
+		// so far (current time + any load averages below) instead of panicking.
+		if laMatch := reUptimeLoadAvg.FindStringSubmatch(uptimeStr); len(laMatch) > 3 {
+			info.LoadAverage1 = laMatch[1]
+			info.LoadAverage5 = laMatch[2]
+			info.LoadAverage15 = laMatch[3]
+		}
+		return info
+	}
 
-	durationAndUsersMatches := re.FindStringSubmatch(uptimeStr)
-
-	daysHoursRe := regexp.MustCompile(`(\d+).*?,\s*(\d{1,2}):(\d{2})`)
-	daysHoursMatches := daysHoursRe.FindStringSubmatch(durationAndUsersMatches[1])
+	daysHoursMatches := reUptimeDaysHours.FindStringSubmatch(durationAndUsersMatches[1])
 	if len(daysHoursMatches) > 1 {
 		days, _ := strconv.Atoi(daysHoursMatches[1])
 		hours, _ := strconv.Atoi(daysHoursMatches[2])
@@ -92,8 +106,7 @@ func ParseUptimeOutput(uptimeStr string) *UptimeInfo {
 		info.UpDurationMinutes = days*24*60 + hours*60 + minutes
 	} else {
 		//no days. just hours:minutes
-		hourMinRe := regexp.MustCompile(`(\d{1,2}):(\d{2})`)
-		hourMinMatches := hourMinRe.FindStringSubmatch(durationAndUsersMatches[1])
+		hourMinMatches := reUptimeHourMin.FindStringSubmatch(durationAndUsersMatches[1])
 		if len(hourMinMatches) > 1 {
 			hours, _ := strconv.Atoi(hourMinMatches[1])
 			minutes, _ := strconv.Atoi(hourMinMatches[2])
@@ -103,8 +116,7 @@ func ParseUptimeOutput(uptimeStr string) *UptimeInfo {
 
 	info.Users, _ = strconv.Atoi(durationAndUsersMatches[2])
 
-	loadAvgRe := regexp.MustCompile(`load averages?\s*:\s*(\d+\.\d+)[,\s]\s*(\d+\.\d+)[,\s]\s*(\d+\.\d+)`)
-	laMatch := loadAvgRe.FindStringSubmatch(uptimeStr)
+	laMatch := reUptimeLoadAvg.FindStringSubmatch(uptimeStr)
 
 	if len(laMatch) > 3 {
 		info.LoadAverage1 = laMatch[1]

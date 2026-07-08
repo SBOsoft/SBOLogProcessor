@@ -432,8 +432,9 @@ func TestParseUserAgentBytespider(t *testing.T) {
 		t.Errorf("Expected DeviceType_Script but got %v", ua.DeviceType)
 	}
 
-	if ua.Family != UAFamily_SocialBot {
-		t.Errorf("Expected UAFamily_SocialBot but got %v", ua.Family)
+	//Bytespider is a ByteDance AI training crawler, classified as an AI bot
+	if ua.Family != UAFamily_AIBot {
+		t.Errorf("Expected UAFamily_AIBot but got %v", ua.Family)
 	}
 	if ua.Human != Human_No {
 		t.Errorf("Expected Human_No but got %v", ua.Human)
@@ -457,8 +458,9 @@ func TestParseUserAgentBytespider2(t *testing.T) {
 		t.Errorf("Expected DeviceType_Script but got %v", ua.DeviceType)
 	}
 
-	if ua.Family != UAFamily_SocialBot {
-		t.Errorf("Expected UAFamily_SocialBot but got %v", ua.Family)
+	//Bytespider is a ByteDance AI training crawler, classified as an AI bot
+	if ua.Family != UAFamily_AIBot {
+		t.Errorf("Expected UAFamily_AIBot but got %v", ua.Family)
 	}
 	if ua.Human != Human_No {
 		t.Errorf("Expected Human_No but got %v", ua.Human)
@@ -657,5 +659,78 @@ func TestParseUserAgentAmazonbot(t *testing.T) {
 
 	if ua.FullName != uaString {
 		t.Errorf("FullName not set")
+	}
+}
+
+// --- Coverage for refreshed 2026 matcher lists (see docs/useragent-review.md) ---
+
+func TestParseUserAgentChatGPTUser(t *testing.T) {
+	uaString := `Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; ChatGPT-User/1.0; +https://openai.com/bot`
+
+	ua := NewSBOUserAgent(uaString)
+	fmt.Printf("DeviceType: %v Family:%v Human:%v OS:%v \n", ua.DeviceType, ua.Family, ua.Human, ua.OS)
+	if ua.Family != UAFamily_AIBot {
+		t.Errorf("Expected UAFamily_AIBot but got %v", ua.Family)
+	}
+	if ua.DeviceType != DeviceType_Script {
+		t.Errorf("Expected DeviceType_Script but got %v", ua.DeviceType)
+	}
+	if ua.Human != Human_No {
+		t.Errorf("Expected Human_No but got %v", ua.Human)
+	}
+}
+
+func TestParseUserAgentPerplexityBot(t *testing.T) {
+	uaString := `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 (compatible; PerplexityBot/1.0; +https://perplexity.ai/perplexitybot)`
+
+	ua := NewSBOUserAgent(uaString)
+	fmt.Printf("DeviceType: %v Family:%v Human:%v OS:%v \n", ua.DeviceType, ua.Family, ua.Human, ua.OS)
+	if ua.Family != UAFamily_AIBot {
+		t.Errorf("Expected UAFamily_AIBot but got %v", ua.Family)
+	}
+	if ua.Human != Human_No {
+		t.Errorf("Expected Human_No but got %v", ua.Human)
+	}
+}
+
+func TestParseUserAgentApplebot(t *testing.T) {
+	uaString := `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.1.1 Safari/605.1.15 (Applebot/0.1; +http://www.apple.com/go/applebot)`
+
+	ua := NewSBOUserAgent(uaString)
+	fmt.Printf("DeviceType: %v Family:%v Human:%v OS:%v \n", ua.DeviceType, ua.Family, ua.Human, ua.OS)
+	if ua.Family != UAFamily_SearchBot {
+		t.Errorf("Expected UAFamily_SearchBot but got %v", ua.Family)
+	}
+	if ua.Human != Human_No {
+		t.Errorf("Expected Human_No but got %v", ua.Human)
+	}
+}
+
+func TestParseUserAgentDataForSeoBot(t *testing.T) {
+	uaString := `Mozilla/5.0 (compatible; DataForSeoBot/1.0; +https://dataforseo.com/dataforseo-bot)`
+
+	ua := NewSBOUserAgent(uaString)
+	fmt.Printf("DeviceType: %v Family:%v Human:%v OS:%v \n", ua.DeviceType, ua.Family, ua.Human, ua.OS)
+	if ua.Family != UAFamily_SEOBot {
+		t.Errorf("Expected UAFamily_SEOBot but got %v", ua.Family)
+	}
+	if ua.Human != Human_No {
+		t.Errorf("Expected Human_No but got %v", ua.Human)
+	}
+}
+
+func TestParseUserAgentSqlmap(t *testing.T) {
+	uaString := `sqlmap/1.5.2#stable (http://sqlmap.org)`
+
+	ua := NewSBOUserAgent(uaString)
+	fmt.Printf("DeviceType: %v Family:%v Human:%v OS:%v \n", ua.DeviceType, ua.Family, ua.Human, ua.OS)
+	if ua.Family != UAFamily_Scanner {
+		t.Errorf("Expected UAFamily_Scanner but got %v", ua.Family)
+	}
+	if ua.Intent != RequestIntent_Scanning {
+		t.Errorf("Expected RequestIntent_Scanning but got %v", ua.Intent)
+	}
+	if ua.Human != Human_No {
+		t.Errorf("Expected Human_No but got %v", ua.Human)
 	}
 }

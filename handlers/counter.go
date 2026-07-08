@@ -324,6 +324,13 @@ outOf2Loops:
 }
 
 func (handler *CounterHandler) PrintCounterData(fromTicker bool) {
+	// Reads the shared counters and reassigns the Clients/Referers/RequestedPaths
+	// maps (via ShrinkCounterMapLeavingTopN), all of which HandleEntry mutates under
+	// this same mutex. Hold it for the whole print to avoid a data race. Callers
+	// (tickerTick/Begin/End) invoke startNewWindow separately, so no nested locking.
+	handler.syncMutex.Lock()
+	defer handler.syncMutex.Unlock()
+
 	fmt.Printf("---------%v---------", time.Now().UTC().Format(time.RFC3339))
 	fmt.Println()
 	if handler.isFollowing {

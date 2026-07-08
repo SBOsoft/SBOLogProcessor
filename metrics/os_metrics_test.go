@@ -28,36 +28,35 @@ func TestGetOSUptimeInfo(t *testing.T) {
 
 	uptimeInfo, err := GetOSUptimeInfo()
 
+	// The `uptime` command is Linux/macOS only. On platforms where it is not
+	// available (e.g. Windows) GetOSUptimeInfo returns a nil result and an error;
+	// skip rather than nil-deref/fail.
+	if err != nil || uptimeInfo == nil {
+		t.Skipf("uptime command not available on this platform: %v", err)
+	}
+
 	fmt.Printf("Current time: %v \n", uptimeInfo.CurrentTime)
 	fmt.Printf("LoadAverage1: %v \n", uptimeInfo.LoadAverage1)
 	fmt.Printf("LoadAverage5: %v \n", uptimeInfo.LoadAverage5)
 	fmt.Printf("LoadAverage15: %v \n", uptimeInfo.LoadAverage15)
 	fmt.Printf("UpDurationMinutes: %v \n", uptimeInfo.UpDurationMinutes)
 	fmt.Printf("Users: %v \n", uptimeInfo.Users)
-
-	//slog.Warn("Values", "values", sbom.Values)
-	if err != nil {
-		t.Error("Failed to run uptime command", "err", err)
-	}
-
 }
 
 func TestGetOSUptimeInfoMacOS(t *testing.T) {
 
 	uptimeInfo, err := GetOSUptimeInfo()
 
+	if err != nil || uptimeInfo == nil {
+		t.Skipf("uptime command not available on this platform: %v", err)
+	}
+
 	fmt.Printf("Current time: %v \n", uptimeInfo.CurrentTime)
 	fmt.Printf("LoadAverage1: %v \n", uptimeInfo.LoadAverage1)
 	fmt.Printf("LoadAverage5: %v \n", uptimeInfo.LoadAverage5)
 	fmt.Printf("LoadAverage15: %v \n", uptimeInfo.LoadAverage15)
 	fmt.Printf("UpDurationMinutes: %v \n", uptimeInfo.UpDurationMinutes)
 	fmt.Printf("Users: %v \n", uptimeInfo.Users)
-
-	//slog.Warn("Values", "values", sbom.Values)
-	if err != nil {
-		t.Error("Failed to run uptime command", "err", err)
-	}
-
 }
 
 func TestParseUptimeOutputMacOS(t *testing.T) {

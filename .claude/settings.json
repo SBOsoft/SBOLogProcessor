@@ -1,0 +1,19 @@
+{
+  "$comment": "Project-scoped Claude Code settings for SBOLogProcessor. Allowlists common read-only Go/git commands so routine review work doesn't prompt. Adjust to taste.",
+  "permissions": {
+    "allow": [
+      "Bash(go build:*)",
+      "Bash(go vet:*)",
+      "Bash(go test:*)",
+      "Bash(go run:*)",
+      "Bash(gofmt:*)",
+      "Bash(go doc:*)",
+      "Bash(go list:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git ls-files:*)"
+    ],
+    "deny": []
+  }
+}

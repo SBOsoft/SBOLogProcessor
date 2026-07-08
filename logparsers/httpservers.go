@@ -37,6 +37,19 @@ const (
 	REQUEST_MALICIOUS_SCAN      int = 40
 )
 
+// Compile all regexes once at package load. These functions run on the hot path
+// (once per log line), so compiling per call would be a significant waste.
+var (
+	reUtmSource      = regexp.MustCompile(`(\?|&)utm_source=([^&]+)(&|\z)`)
+	reSqlInjection   = regexp.MustCompile(`'.*(insert|update|exec|execute)`)
+	reXSS            = regexp.MustCompile(`<script|script>|alert|onmouseover|onmouseout`)
+	reApacheCommon   = regexp.MustCompile(`^(\S+) (\S+) (\S+) \[([^\]]+)\] "(\S+) (\S+) (\S+)" (\d+) (\d+)$`)
+	reApacheCombined = regexp.MustCompile(`^(\S+) (\S+) (\S+) \[([^\]]+)\] "(\S+) (\S+) (\S+)" (\d+) (\d+) "([^"]*)" "([^"]*)"$`)
+	reApacheVHost    = regexp.MustCompile(`^(\S+) (\S+) (\S+) (\S+) \[([^\]]+)\] "(\S+) (\S+) (\S+)" (\d+) (\d+) "([^"]*)" "([^"]*)"$`)
+	reNginxCombined  = regexp.MustCompile(`^(\S+) - (\S+) \[([^\]]+)\] "(\S+) (\S+) (\S+)" (\d+) (\d+) "([^"]*)" "([^"]*)"$`)
+	reNginxCustom    = regexp.MustCompile(`^(\S+) - (\S+) \[([^\]]+)\] "(\S+) (\S+) (\S+)" (\d+) (\d+) "([^"]*)" "([^"]*)" (\S+) (\S+)$`)
+)
+
 type SBOHttpRequestLog struct {
 	Domain   string
 	ClientIP string
@@ -78,8 +91,7 @@ func (sbol *SBOHttpRequestLog) SBOHttpRequestLogSetUserAgent(userAgent string) {
 
 func (sbol *SBOHttpRequestLog) SBOHttpRequestLogSetReferer(referer string, requestUri string) {
 	//sbol.Referer = referer
-	rx := regexp.MustCompile(`(\?|&)utm_source=([^&]+)(&|\z)`)
-	match := rx.FindStringSubmatch(requestUri)
+	match := reUtmSource.FindStringSubmatch(requestUri)
 	if len(match) > 0 {
 		sbol.Referer = match[2]
 	} else if len(referer) > 0 {
@@ -142,8 +154,7 @@ func isDirectoryTraversal(parsedPath string, requestUriVerbatimFromLog string) b
 TODO obviously far from ideal, just placeholders for now
 */
 func isSqlInjectionAttempt(rawQueryString string) bool {
-	rx := regexp.MustCompile(`'.*(insert|update|exec|execute)`)
-	match := rx.FindString(rawQueryString)
+	match := reSqlInjection.FindString(rawQueryString)
 
 	if len(match) > 0 {
 		return true
@@ -155,8 +166,7 @@ func isSqlInjectionAttempt(rawQueryString string) bool {
 TODO obviously far from ideal, just placeholders for now
 */
 func isXSSAttempt(rawQueryString string) bool {
-	rx := regexp.MustCompile(`<script|script>|alert|onmouseover|onmouseout`)
-	match := rx.FindString(rawQueryString)
+	match := reXSS.FindString(rawQueryString)
 
 	if len(match) > 0 {
 		return true
@@ -167,8 +177,7 @@ func isXSSAttempt(rawQueryString string) bool {
 // CommonLogFormat parses a line in Common Log Format (CLF)
 // Example: 127.0.0.1 - frank [10/Oct/2000:13:55:36 -0700] "GET /apache_pb.gif HTTP/1.0" 200 2326
 func ParseApacheCommonLogFormat(line string) (*SBOHttpRequestLog, error) {
-	re := regexp.MustCompile(`^(\S+) (\S+) (\S+) \[([^\]]+)\] "(\S+) (\S+) (\S+)" (\d+) (\d+)$`)
-	matches := re.FindStringSubmatch(line)
+	matches := reApacheCommon.FindStringSubmatch(line)
 	if len(matches) != 10 {
 		return nil, ErrInvalidLogFormat
 	}
@@ -194,8 +203,7 @@ func ParseApacheCommonLogFormat(line string) (*SBOHttpRequestLog, error) {
 // CombinedLogFormat parses a line in Combined Log Format
 // Example: 127.0.0.1 - frank [10/Oct/2000:13:55:36 -0700] "GET /apache_pb.gif HTTP/1.0" 200 2326 "http://www.example.com/start.html" "Mozilla/4.08 [en] (Win98; I ;Nav)"
 func ParseApacheCombinedLogFormat(line string) (*SBOHttpRequestLog, error) {
-	re := regexp.MustCompile(`^(\S+) (\S+) (\S+) \[([^\]]+)\] "(\S+) (\S+) (\S+)" (\d+) (\d+) "([^"]*)" "([^"]*)"$`)
-	matches := re.FindStringSubmatch(line)
+	matches := reApacheCombined.FindStringSubmatch(line)
 	//slog.Debug("ParseApacheCombinedLogFormat", "matches", matches)
 	if len(matches) != 12 {
 		return nil, ErrInvalidLogFormat
@@ -226,8 +234,7 @@ func ParseApacheCombinedLogFormat(line string) (*SBOHttpRequestLog, error) {
 // VHostCombinedLogFormat parses a line in Virtual Host Combined Log Format
 // Example: example.com:80 127.0.0.1 - frank [10/Oct/2000:13:55:36 -0700] "GET /apache_pb.gif HTTP/1.0" 200 2326 "http://www.example.com/start.html" "Mozilla/4.08 [en] (Win98; I ;Nav)"
 func ParseApacheVHostCombinedLogFormat(line string) (*SBOHttpRequestLog, error) {
-	re := regexp.MustCompile(`^(\S+) (\S+) (\S+) (\S+) \[([^\]]+)\] "(\S+) (\S+) (\S+)" (\d+) (\d+) "([^"]*)" "([^"]*)"$`)
-	matches := re.FindStringSubmatch(line)
+	matches := reApacheVHost.FindStringSubmatch(line)
 	if len(matches) != 13 {
 		return nil, ErrInvalidLogFormat
 	}
@@ -257,8 +264,7 @@ func ParseApacheVHostCombinedLogFormat(line string) (*SBOHttpRequestLog, error) 
 // NginxCombinedFormat parses a line in Nginx Combined Log Format
 // Example: 127.0.0.1 - - [10/Oct/2000:13:55:36 -0700] "GET / HTTP/1.1" 200 612 "-" "Mozilla/5.0 (Macintosh)"
 func ParseNginxCombinedFormat(line string) (*SBOHttpRequestLog, error) {
-	re := regexp.MustCompile(`^(\S+) - (\S+) \[([^\]]+)\] "(\S+) (\S+) (\S+)" (\d+) (\d+) "([^"]*)" "([^"]*)"$`)
-	matches := re.FindStringSubmatch(line)
+	matches := reNginxCombined.FindStringSubmatch(line)
 	if len(matches) != 11 {
 		return nil, ErrInvalidLogFormat
 	}
@@ -286,8 +292,7 @@ func ParseNginxCombinedFormat(line string) (*SBOHttpRequestLog, error) {
 // NginxCustomFormat parses a line in Nginx Custom Log Format (with $request_time and $upstream_response_time)
 // Example: 127.0.0.1 - - [10/Oct/2000:13:55:36 -0700] "GET / HTTP/1.1" 200 612 "-" "Mozilla/5.0" 0.123 0.456
 func ParseNginxCustomFormat(line string) (*SBOHttpRequestLog, error) {
-	re := regexp.MustCompile(`^(\S+) - (\S+) \[([^\]]+)\] "(\S+) (\S+) (\S+)" (\d+) (\d+) "([^"]*)" "([^"]*)" (\S+) (\S+)$`)
-	matches := re.FindStringSubmatch(line)
+	matches := reNginxCustom.FindStringSubmatch(line)
 	if len(matches) != 13 {
 		return nil, ErrInvalidLogFormat
 	}

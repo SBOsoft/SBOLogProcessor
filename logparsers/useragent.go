@@ -102,17 +102,31 @@ const (
 	RequestIntent_Processing string = "Processing"
 )
 
-var reSearchBots *regexp.Regexp = regexp.MustCompile(`(googlebot|bingbot|baiduspider|yandexbot|duckduckbot)`)
+// Matchers run in order; first match wins. All patterns are lowercase because the
+// UA string is lower-cased before matching. Refreshed 2026-07 - see docs/useragent-review.md.
 
-var reSocialBots *regexp.Regexp = regexp.MustCompile(`(facebookexternalhit|twitterbot|linkedinbot|pinterestbot|slackbot|bytespider)`)
+// Search-engine crawlers (indexing)
+var reSearchBots *regexp.Regexp = regexp.MustCompile(`(googlebot|bingbot|baiduspider|yandexbot|duckduckbot|applebot|petalbot|seznambot|sogou|exabot|bravebot|googleother|google-inspectiontool|coccocbot|mojeekbot|yeti)`)
 
-var reMarketingBots *regexp.Regexp = regexp.MustCompile(`(ahrefs|semrush|dotbot|mj12bot|seobilitybot|siteauditbot|yandex.)`)
+// Social / link-preview / messaging unfurlers
+var reSocialBots *regexp.Regexp = regexp.MustCompile(`(facebookexternalhit|facebookcatalog|twitterbot|linkedinbot|pinterest|slackbot|slack-imgproxy|telegrambot|whatsapp|discordbot|redditbot|skypeuripreview|vkshare|embedly|flipboard|tumblr)`)
 
-var reAIBots *regexp.Regexp = regexp.MustCompile(`(gptbot|chatgpt|google-extended|claudebot|meta-externalagent|amazonbot|perplexitybot|youbot)`)
+// SEO / marketing / analytics crawlers
+var reMarketingBots *regexp.Regexp = regexp.MustCompile(`(ahrefs|semrush|dotbot|mj12bot|seobilitybot|siteauditbot|blexbot|dataforseobot|barkrowler|serpstatbot|screaming ?frog|screamingfrogseospider|zoominfobot|awariobot|linkdexbot|rogerbot|majestic|seokicks|sistrix|cocolyzebot|yandeximages)`)
 
-var reScannerBots *regexp.Regexp = regexp.MustCompile(`(censysinspect|expanse|aliyunsecbot|nmap|masscan|zgrab|shodanbot|urlscan|tchelebi)`)
+// AI / LLM crawlers: training-data collectors AND user-triggered fetchers.
+// Note: bytespider (ByteDance) is an AI training crawler, classified here (not as a social bot).
+var reAIBots *regexp.Regexp = regexp.MustCompile(`(gptbot|oai-searchbot|chatgpt-user|chatgpt|claudebot|claude-user|claude-searchbot|anthropic-ai|google-extended|googlebot-news|meta-externalagent|meta-externalfetcher|bytespider|amazonbot|bedrockbot|novaact|perplexitybot|perplexity-user|youbot|cohere-ai|cohere-training-data-crawler|mistralai-user|diffbot|imagesiftbot|omgili|omgilibot|webzio-extended|timpibot|duckassistbot|ai2bot|semanticscholarbot|panscient|friendlycrawler|velenpublicwebcrawler)`)
 
-var reScriptAgents *regexp.Regexp = regexp.MustCompile(`(curl|scrapy|wget|python|go-http-client|java|ruby|okhttp|postman|axios|guzzlehttp|headlesschrome|phantomjs|cloudflare-traffic-manager)`)
+// Security scanners / internet-measurement / attack tooling
+var reScannerBots *regexp.Regexp = regexp.MustCompile(`(censysinspect|censys|expanse|internet-measurement|internetmeasurement|paloaltonetworks|aliyunsecbot|nmap|masscan|zgrab|zmap|shodanbot|shodan|urlscan|tchelebi|binaryedge|criminalip|netsystemsresearch|l9scan|leakix|odin|nuclei|sqlmap|nikto|wpscan|dirbuster|gobuster|feroxbuster|acunetix|nessus|projectdiscovery)`)
+
+// Generic scripts / HTTP libraries / headless browsers
+var reScriptAgents *regexp.Regexp = regexp.MustCompile(`(curl|scrapy|wget|python|python-requests|aiohttp|httpx|go-http-client|java|okhttp|ruby|postman|insomnia|axios|got |node-fetch|undici|guzzlehttp|libwww-perl|lwp::|winhttp|dart|symfony|headlesschrome|phantomjs|puppeteer|playwright|selenium|http_request|cloudflare-traffic-manager)`)
+
+// Structural regex for parsing real browser UA strings: matches parenthesised
+// groups "(...)" or "token/version" pairs. Compiled once (hot path, per UA).
+var reUAStructure *regexp.Regexp = regexp.MustCompile(`\s*\(([^)]+)\)|\s*([^/]+/[^ ]+)`)
 
 type SBOUserAgent struct {
 	FullName   string
@@ -188,8 +202,7 @@ func NewSBOUserAgent(uaString string) *SBOUserAgent {
 			var foundFirefox bool = false
 			var foundEdge bool = false
 
-			var rx = regexp.MustCompile(`\s*\(([^)]+)\)|\s*([^/]+/[^ ]+)`)
-			matches := rx.FindAllStringSubmatch(after, -1)
+			matches := reUAStructure.FindAllStringSubmatch(after, -1)
 			for _, v := range matches {
 				if len(v[1]) > 0 { //paranthesis
 					if strings.HasPrefix(v[1], "Windows") {
