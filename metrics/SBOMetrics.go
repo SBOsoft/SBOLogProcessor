@@ -199,22 +199,25 @@ func NormalizeTimeWindowSizeMinutes(minutes int) int {
 	return TIME_WINDOW_SIZE_MINUTES_DEFAULT
 }
 
-// returns the time window as a yyyyMMddHHmm number, e.g 202507061130, using the local time of the timestamp as it appears in the log
+// returns the time window as a yyyyMMddHHmm number in UTC, e.g 202507061130, and the minute the time window starts at
 func timeWindowNumber(timestamp time.Time, sizeMinutes int) (int64, int) {
-	year, month, day := timestamp.Date()
-	hour, minute, _ := timestamp.Clock()
+	utc := timestamp.UTC()
+	year, month, day := utc.Date()
+	hour, minute, _ := utc.Clock()
 	minuteStart := minute - (minute % sizeMinutes)
 	return int64(year)*100000000 + int64(month)*1000000 + int64(day)*10000 + int64(hour)*100 + int64(minuteStart), minuteStart
 }
 
 func timeWindowEnd(timestamp time.Time, minuteStart int, sizeMinutes int) time.Time {
-	year, month, day := timestamp.Date()
-	return time.Date(year, month, day, timestamp.Hour(), minuteStart, 0, 0, timestamp.Location()).Add(time.Duration(sizeMinutes) * time.Minute)
+	utc := timestamp.UTC()
+	year, month, day := utc.Date()
+	return time.Date(year, month, day, utc.Hour(), minuteStart, 0, 0, time.UTC).Add(time.Duration(sizeMinutes) * time.Minute)
 }
 
 /*
 Returns the time window for the timestamp as a yyyyMMddHHmm number, e.g 202507061130, and the end of the time window.
-Time windows use the local time of the timestamp (i.e as it appears in the log line).
+Time windows are always in UTC, regardless of the time zone of the log, so that logs from servers in different
+time zones are consistent with each other and with request_ts values saved in sbo_rawlogs (also UTC).
 */
 func CalculateTimeWindow(timestamp time.Time, timeWindowSizeMinutes int) (int64, time.Time) {
 	sizeMinutes := NormalizeTimeWindowSizeMinutes(timeWindowSizeMinutes)

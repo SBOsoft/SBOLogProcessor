@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-sql-driver/mysql"
 
@@ -85,5 +86,15 @@ func TestIsRetryableError(t *testing.T) {
 	}
 	if isRetryableError(&mysql.MySQLError{Number: 1062}) || isRetryableError(mysql.ErrInvalidConn) {
 		t.Error("other errors must not be retried")
+	}
+}
+
+func TestFormatRequestTimestamp(t *testing.T) {
+	//the same moment in different time zones must be saved as the same UTC value
+	utc := time.Date(2026, 11, 13, 21, 5, 9, 0, time.UTC)
+	for _, zone := range []*time.Location{time.UTC, time.FixedZone("+0300", 3*60*60), time.FixedZone("-0800", -8*60*60), time.FixedZone("+0530", 5*60*60+30*60)} {
+		if got := FormatRequestTimestamp(utc.In(zone)); got != "2026-11-13 21:05:09" {
+			t.Errorf("zone=%v expected 2026-11-13 21:05:09 got %s", zone, got)
+		}
 	}
 }

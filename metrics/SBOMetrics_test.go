@@ -81,27 +81,56 @@ func addEntry(m *SBOMetricsManager, saved *savedValues, metricType int, key stri
 }
 
 func TestCalculateTimeWindow(t *testing.T) {
+	//10:47:33 +0300 is 07:47:33 UTC, time windows are in UTC
 	timestamp := time.Date(2026, 11, 13, 10, 47, 33, 0, testLocation)
 	tests := []struct {
 		size        int
 		expectedTw  int64
 		expectedEnd time.Time
 	}{
-		{1, 202611131047, ts(10, 48)},
-		{5, 202611131045, ts(10, 50)},
-		{10, 202611131040, ts(10, 50)},
-		{15, 202611131045, ts(11, 0)},
-		{30, 202611131030, ts(11, 0)},
-		{60, 202611131000, ts(11, 0)},
+		{1, 202611130747, ts(10, 48)},
+		{5, 202611130745, ts(10, 50)},
+		{10, 202611130740, ts(10, 50)},
+		{15, 202611130745, ts(11, 0)},
+		{30, 202611130730, ts(11, 0)},
+		{60, 202611130700, ts(11, 0)},
 		//unsupported, default 10
-		{20, 202611131040, ts(10, 50)},
-		{0, 202611131040, ts(10, 50)},
+		{20, 202611130740, ts(10, 50)},
+		{0, 202611130740, ts(10, 50)},
 	}
 	for _, test := range tests {
 		timeWindow, end := CalculateTimeWindow(timestamp, test.size)
 		if timeWindow != test.expectedTw || !end.Equal(test.expectedEnd) {
 			t.Errorf("size=%d expected %d %v got %d %v", test.size, test.expectedTw, test.expectedEnd, timeWindow, end)
 		}
+	}
+}
+
+// the same moment logged in different time zones must be in the same (UTC) time window
+func TestCalculateTimeWindowTimeZones(t *testing.T) {
+	utc := time.Date(2026, 11, 13, 5, 17, 0, 0, time.UTC)
+	zones := []*time.Location{time.UTC, testLocation, time.FixedZone("-0500", -5*60*60), time.FixedZone("+0530", 5*60*60+30*60)}
+	for _, size := range []int{1, 5, 10, 15, 30, 60} {
+		expectedTw, expectedEnd := CalculateTimeWindow(utc, size)
+		for _, zone := range zones {
+			timeWindow, end := CalculateTimeWindow(utc.In(zone), size)
+			if timeWindow != expectedTw || !end.Equal(expectedEnd) || end.Location() != time.UTC {
+				t.Errorf("size=%d zone=%v expected %d %v got %d %v", size, zone, expectedTw, expectedEnd, timeWindow, end)
+			}
+		}
+	}
+	if tw, _ := CalculateTimeWindow(utc.In(time.FixedZone("+0530", 5*60*60+30*60)), 60); tw != 202611130500 {
+		t.Errorf("expected the 05:00 UTC hour, got %d", tw)
+	}
+	//metrics from log files in different time zones end up in the same time windows
+	m := newTestManager(3, false)
+	saved := newSavedValues(false)
+	for _, zone := range zones {
+		addEntry(m, saved, SBO_METRIC_REQ_COUNT, "", utc.In(zone), 1)
+	}
+	saved.save(m.FlushAll(testFile))
+	if saved.values[savedKey(SBO_METRIC_REQ_COUNT, "", 202611130510)] != int64(len(zones)) || len(saved.values) != 1 {
+		t.Errorf("expected all entries in the 05:10 UTC time window, got %v", saved.values)
 	}
 }
 

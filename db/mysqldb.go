@@ -38,6 +38,15 @@ import (
 
 const MYSQL_DATETIME_FORMAT string = "2006-01-02 15:04:05"
 
+/*
+request_ts values in sbo_rawlogs are always in UTC, regardless of the time zone of the log, so that logs from servers in
+different time zones are consistent. Metric time windows are in UTC too, see metrics.CalculateTimeWindow.
+Converted explicitly instead of relying on the time zone setting of the mysql driver.
+*/
+func FormatRequestTimestamp(timestamp time.Time) string {
+	return timestamp.UTC().Format(MYSQL_DATETIME_FORMAT)
+}
+
 type SBOAnalyticsDB struct {
 	DbInstance     *sql.DB
 	IsInitialized  bool
@@ -261,9 +270,7 @@ func (sboadb *SBOAnalyticsDB) SaveRawLog(data *logparsers.SBOHttpRequestLog, dom
 		"?, ?, ?, ?, ?, ?) "
 
 	var err error = nil
-	//save the local time as it appears in the log line, NOT converted to UTC (the mysql driver converts time.Time values to UTC by default)
-	// metric time windows are calculated using the same local time, so logs and metrics for a time window must match
-	requestTs := data.Timestamp.Format(MYSQL_DATETIME_FORMAT)
+	requestTs := FormatRequestTimestamp(data.Timestamp)
 	pathUpTo3rd := data.Path3
 	if len(pathUpTo3rd) < 1 {
 		pathUpTo3rd = data.Path2
