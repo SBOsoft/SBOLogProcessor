@@ -28,9 +28,11 @@ import (
 	"log"
 	"log/slog"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -61,6 +63,9 @@ var globalConfig map[string]*ConfigForAMonitoredFile = make(map[string]*ConfigFo
 var globalActiveProfile string = SBO_GLOBAL_PROFILE_METRICS
 var globalActiveLogLevel slog.Level = slog.LevelInfo
 
+// closed when the program should stop, e.g on SIGINT/SIGTERM. Goroutines must stop what they are doing and return
+var globalStopChannel = make(chan struct{})
+
 func main() {
 	if len(os.Args) < 2 {
 		log.Fatal("Please provide a file path as argument")
@@ -72,6 +77,9 @@ func main() {
 	if logFile != nil {
 		defer logFile.Close()
 	}
+
+	validateAndAdjustConfig()
+	setupSignalHandling()
 
 	slog.Info("Starting app with configuration:")
 	for fp, cfg := range globalConfig {
@@ -97,6 +105,64 @@ func main() {
 
 	wg.Wait()
 
+}
+
+/*
+On the first SIGINT/SIGTERM stop gracefully: stop reading files, process lines already read, save metrics for open time windows
+and save read positions. On the second signal exit immediately.
+*/
+func setupSignalHandling() {
+	signals := make(chan os.Signal, 2)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		sig := <-signals
+		slog.Info("Received signal, stopping gracefully. Send the signal again to exit immediately", "signal", sig)
+		close(globalStopChannel)
+		sig = <-signals
+		slog.Warn("Received second signal, exiting immediately", "signal", sig)
+		os.Exit(1)
+	}()
+}
+
+func isStopRequested() bool {
+	select {
+	case <-globalStopChannel:
+		return true
+	default:
+		return false
+	}
+}
+
+/*
+Adjust configuration values that would lead to incorrect metrics. Call after logging is configured.
+*/
+func validateAndAdjustConfig() {
+	filesPerDomain := make(map[string]int)
+	for filePath, config := range globalConfig {
+		if filePath == DEFAULT_CONFIG_KEY || filePath == OSMETRICS_CONFIG_KEY || !config.WriteMetricsToDb {
+			continue
+		}
+		filesPerDomain[config.DomainName]++
+		if len(config.DomainName) < 1 {
+			slog.Warn("DomainName is empty but WriteMetricsToDb is true. Metrics are saved under DomainName, you should configure it", "filePath", filePath)
+		}
+	}
+	for filePath, config := range globalConfig {
+		if filePath == DEFAULT_CONFIG_KEY || filePath == OSMETRICS_CONFIG_KEY || !config.WriteMetricsToDb || !config.ReplaceExistingMetrics {
+			continue
+		}
+		if config.SaveReadPosition {
+			//after a restart processing continues in the middle of a time window, the value saved before the restart must be kept
+			slog.Warn("ReplaceExistingMetrics=true is not supported together with SaveReadPosition=true, using ReplaceExistingMetrics=false", "filePath", filePath)
+			config.ReplaceExistingMetrics = false
+		} else if filesPerDomain[config.DomainName] > 1 {
+			//metrics from different files for the same domain and time window would replace each other
+			slog.Warn("ReplaceExistingMetrics=true is not supported when multiple files are configured with the same DomainName, using ReplaceExistingMetrics=false. "+
+				"Metrics are added to existing values, so set SaveReadPosition=true to avoid counting the same lines again after a restart",
+				"filePath", filePath, "domainName", config.DomainName)
+			config.ReplaceExistingMetrics = false
+		}
+	}
 }
 
 func setupOSMetricsCollection(wg *sync.WaitGroup) {
@@ -168,7 +234,11 @@ func setupOSMetricsCollection(wg *sync.WaitGroup) {
 	if initialDelay > 0 {
 		slog.Info("Will start OS metrics collection at", "time", nextRunTime, "initialDelay", initialDelay.Round(time.Second))
 		// Wait for the initial delay
-		time.Sleep(initialDelay)
+		select {
+		case <-time.After(initialDelay):
+		case <-globalStopChannel:
+			return
+		}
 	}
 
 	//db conn
@@ -194,9 +264,15 @@ func setupOSMetricsCollection(wg *sync.WaitGroup) {
 	ticker := time.NewTicker(time.Duration(metricsRunInterval) * time.Minute)
 	defer ticker.Stop() // Ensure the ticker is stopped when func exits
 
-	for range ticker.C {
-		slog.Debug("Collecting OS metrics in scheduled task")
-		processOSMetrics(sbodb, false)
+	for {
+		select {
+		case <-ticker.C:
+			slog.Debug("Collecting OS metrics in scheduled task")
+			processOSMetrics(sbodb, false)
+		case <-globalStopChannel:
+			slog.Info("Stopping OS metrics collection")
+			return
+		}
 	}
 
 }
@@ -440,6 +516,14 @@ func loadConfigFromFile(configFileName string) bool {
 		conf["OSMetricsEnabled_ok"] = ok
 		mapOSMetricsIntervalMinutes, ok := conf["OSMetricsIntervalMinutes"].(float64)
 		conf["OSMetricsIntervalMinutes_ok"] = ok
+		mapSaveReadPosition, ok := conf["SaveReadPosition"].(bool)
+		conf["SaveReadPosition_ok"] = ok
+		if !ok {
+			//on by default
+			mapSaveReadPosition = true
+		}
+		mapReadPositionDirectory, ok := conf["ReadPositionDirectory"].(string)
+		conf["ReadPositionDirectory_ok"] = ok
 
 		handlersArrayAsStrings := make([]string, len(mapHandlers))
 		for indexInHandlers, handlerNameValue := range mapHandlers {
@@ -470,7 +554,9 @@ func loadConfigFromFile(configFileName string) bool {
 			SaveLogsToDbMaskIPs:          mapSaveLogsToDbMaskIPs,
 			SaveLogsToDbOnlyRelevant:     int(mapSaveLogsToDbOnlyRelevant),
 			OSMetricsEnabled:             mapOSMetricsEnabled,
-			OSMetricsIntervalMinutes:     int(mapOSMetricsIntervalMinutes)}
+			OSMetricsIntervalMinutes:     int(mapOSMetricsIntervalMinutes),
+			SaveReadPosition:             mapSaveReadPosition,
+			ReadPositionDirectory:        mapReadPositionDirectory}
 
 	}
 	_, configContainsDefaultEntry := globalConfig[DEFAULT_CONFIG_KEY]
@@ -547,6 +633,12 @@ func loadConfigFromFile(configFileName string) bool {
 			if !configLoadedFromFile[filePath]["OSMetricsIntervalMinutes_ok"].(bool) {
 				globalConfig[filePath].OSMetricsIntervalMinutes = globalConfig[DEFAULT_CONFIG_KEY].OSMetricsIntervalMinutes
 			}
+			if !configLoadedFromFile[filePath]["SaveReadPosition_ok"].(bool) {
+				globalConfig[filePath].SaveReadPosition = globalConfig[DEFAULT_CONFIG_KEY].SaveReadPosition
+			}
+			if !configLoadedFromFile[filePath]["ReadPositionDirectory_ok"].(bool) {
+				globalConfig[filePath].ReadPositionDirectory = globalConfig[DEFAULT_CONFIG_KEY].ReadPositionDirectory
+			}
 		}
 
 		_, ok := globalConfig[OSMETRICS_CONFIG_KEY]
@@ -604,8 +696,9 @@ func processFile(filePath string, parentWaitGroup *sync.WaitGroup) {
 	slog.Info("Starting to process file", "file", filePath)
 
 	config := getConfigForFile(filePath)
-	lines := make(chan string, 10) // Buffered channel to prevent blocking
+	lines := make(chan logLineToProcess, 10) // Buffered channel to prevent blocking
 	dataToBeSavedChannel := make(chan *metrics.SBOMetricWindowDataToBeSaved, 100)
+	readPositions := newReadPositionTracker(filePath, config)
 
 	sbodb := db.NewSBOAnalyticsDB()
 	if config.WriteMetricsToDb || config.SaveLogsToDb {
@@ -617,7 +710,7 @@ func processFile(filePath string, parentWaitGroup *sync.WaitGroup) {
 	var waitGroupForThisFile sync.WaitGroup
 	waitGroupForThisFile.Add(1)
 	// Start consumer (producer -> consumer -> save data) consumer generates metrics etc
-	go consumeLinesFromChannel(filePath, lines, &waitGroupForThisFile, dataToBeSavedChannel, sbodb)
+	go consumeLinesFromChannel(filePath, lines, &waitGroupForThisFile, dataToBeSavedChannel, sbodb, readPositions)
 
 	waitGroupForThisFile.Add(1)
 
@@ -625,10 +718,12 @@ func processFile(filePath string, parentWaitGroup *sync.WaitGroup) {
 	go processMetricDataToBeSaved(filePath, dataToBeSavedChannel, &waitGroupForThisFile, sbodb)
 
 	// Start producer
-	produceLinesFromFile(filePath, lines)
+	produceLinesFromFile(filePath, lines, readPositions)
 
 	//WaitGroup specific to the file
 	waitGroupForThisFile.Wait()
+	//all read lines are processed and metrics for open time windows are saved by now, save the final read position
+	readPositions.saveIfChanged()
 	slog.Info("Finished processing file", "file", filePath)
 }
 
@@ -681,7 +776,8 @@ func processMetricDataToBeSaved(filePath string, dataToBeSavedChannel chan *metr
 	slog.Debug("processMetricDataToBeSaved done")
 }
 
-func consumeLinesFromChannel(filePath string, linesChannel chan string, wg *sync.WaitGroup, dataToBeSavedChannel chan *metrics.SBOMetricWindowDataToBeSaved, sbodb *db.SBOAnalyticsDB) {
+func consumeLinesFromChannel(filePath string, linesChannel <-chan logLineToProcess, wg *sync.WaitGroup, dataToBeSavedChannel chan *metrics.SBOMetricWindowDataToBeSaved, sbodb *db.SBOAnalyticsDB,
+	readPositions *readPositionTracker) {
 	var processedLineCount, errorCount int
 	var parserFunction func(string) (*logparsers.SBOHttpRequestLog, error) = nil
 	var lineResult bool
@@ -697,12 +793,24 @@ func consumeLinesFromChannel(filePath string, linesChannel chan string, wg *sync
 	defer close(dataToBeSavedChannel)
 
 	slog.Debug("Start consumer in consumeLinesFromChannel", "filePath", filePath)
-	for line := range linesChannel {
-		lineResult, parserFunction = processSingleLogLine(filePath, line, parserFunction, dataToBeSavedChannel, sbodb)
-		if lineResult {
-			processedLineCount++
-		} else {
-			errorCount++
+	saveReadPositionTicker := time.NewTicker(READ_POSITION_SAVE_INTERVAL)
+	defer saveReadPositionTicker.Stop()
+consumeLoop:
+	for {
+		select {
+		case item, ok := <-linesChannel:
+			if !ok {
+				break consumeLoop
+			}
+			lineResult, parserFunction = processSingleLogLine(filePath, item.line, parserFunction, dataToBeSavedChannel, sbodb)
+			if lineResult {
+				processedLineCount++
+			} else {
+				errorCount++
+			}
+			readPositions.update(item)
+		case <-saveReadPositionTicker.C:
+			readPositions.saveIfChanged()
 		}
 	}
 
@@ -798,7 +906,7 @@ func callHandlersForRequestLogEntry(filePath string, parsedLogEntry *logparsers.
 
 }
 
-func produceLinesFromFile(filePath string, lines chan<- string) {
+func produceLinesFromFile(filePath string, lines chan<- logLineToProcess, readPositions *readPositionTracker) {
 	slog.Debug("Enter produceLinesFromFile for file", "filePath", filePath)
 	var watcher *fsnotify.Watcher
 	slog.Debug("produceLinesFromFile global config", "globalConfig", globalConfig)
@@ -825,39 +933,38 @@ func produceLinesFromFile(filePath string, lines chan<- string) {
 
 	}
 	baseNameForFile := filepath.Base(filePath)
-	var file *os.File
-	var fileReader *bufio.Reader
+	var fileReader *monitoredFileReader
 	var err error
 	// Initial file open
-	if file, fileReader, err = openFile(false, filePath); err != nil {
+	if fileReader, err = openFile(false, filePath, readPositions); err != nil {
 		slog.Error("Error opening file", "filePath", filePath, "error", err)
 		return
 	}
+	defer func() {
+		if fileReader != nil {
+			fileReader.file.Close()
+		}
+	}()
 	var waitingForNewData bool = false
 	var isFileAtEnd bool = false
 
 	for {
+		if isStopRequested() {
+			slog.Info("Stop requested, stopped reading the file", "filePath", filePath)
+			return
+		}
 
-		if fileReader != nil {
-			if !waitingForNewData { //dont even try to read if just waiting
-				isFileAtEnd = readSingleLineFromFileReturnTrueIfEOF(filePath, lines, fileReader)
-				if isFileAtEnd && !config.Follow {
-					slog.Info("Finished reading the file and not following, so done...")
-					return
-				}
-				if isFileAtEnd {
-					waitingForNewData = true
-					file.Seek(0, 2)
-					fileReader.Reset(file)
-					slog.Debug("readSingleLineFromFile isFileAtEnd after waitingForNewData was false", "isFileAtEnd", isFileAtEnd)
-				}
-			} else {
-				//slog.Warn("waitingForNewData is true in produceLinesFromFile")
+		if !waitingForNewData { //dont even try to read if just waiting
+			isFileAtEnd = fileReader.readSingleLineReturnTrueIfEOF(lines)
+			if isFileAtEnd && !config.Follow {
+				slog.Info("Finished reading the file and not following, so done...")
+				return
 			}
-
-		} else {
-			slog.Warn("fileReader is nil in produceLinesFromFile", "filePath", filePath)
-			break
+			if isFileAtEnd {
+				waitingForNewData = true
+				fileReader.prepareForNewData(filePath)
+				slog.Debug("readSingleLineFromFile isFileAtEnd after waitingForNewData was false", "isFileAtEnd", isFileAtEnd)
+			}
 		}
 
 		if config.Follow {
@@ -886,14 +993,15 @@ func produceLinesFromFile(filePath string, lines chan<- string) {
 					slog.Info("File was renamed/removed (log rotation)", "file", filePath)
 
 					// read file to end before switching
-					readFileToEnd(filePath, lines, fileReader)
+					fileReader.readToEnd(filePath, lines)
 
-					file.Close()
+					fileReader.file.Close()
+					fileReader = nil
 
 					waitingForNewData = false
 					// Try to reopen the file
 					for i := 0; i < 5; i++ {
-						if file, fileReader, err = openFile(true, filePath); err == nil {
+						if fileReader, err = openFile(true, filePath, readPositions); err == nil {
 							break
 						}
 						time.Sleep(1 * time.Second)
@@ -923,64 +1031,98 @@ func produceLinesFromFile(filePath string, lines chan<- string) {
 	}
 }
 
-func openFile(reopeningAfterRotate bool, filePath string) (*os.File, *bufio.Reader, error) {
+// a monitored file opened for reading
+type monitoredFileReader struct {
+	file   *os.File
+	reader *bufio.Reader
+	//offset of the next byte to be read by reader
+	offset      int64
+	fingerprint fileFingerprint
+}
+
+/*
+Opens the file and positions it according to the configuration: at the saved read position if there is a valid one,
+otherwise as configured by StartFrom. Always starts from the beginning when reopening after a rotation.
+*/
+func openFile(reopeningAfterRotate bool, filePath string, readPositions *readPositionTracker) (*monitoredFileReader, error) {
 	var err error
-	var file *os.File
-	var fileReader *bufio.Reader
 	config := getConfigForFile(filePath)
-	file, err = os.Open(filePath)
-
-	fileReader = nil
-
+	file, err := os.Open(filePath)
 	if err != nil {
 		slog.Error("Error opening file", "filePath", filePath, "error", err)
-		return file, fileReader, err
+		return nil, err
+	}
+	fileReader := &monitoredFileReader{file: file}
+
+	resumeOffset, resume := int64(0), false
+	if !reopeningAfterRotate {
+		resumeOffset, resume = readPositions.getResumeOffset(file)
 	}
 
-	if reopeningAfterRotate || config.StartFrom == START_FROM_BEGINNING {
+	if resume {
+		slog.Info("Continuing from saved read position", "filePath", filePath, "offset", resumeOffset)
+		fileReader.offset, err = file.Seek(resumeOffset, io.SeekStart)
+	} else if reopeningAfterRotate || config.StartFrom == START_FROM_BEGINNING {
 		// Seek to beginning if file exists
-		_, err = file.Seek(0, 0)
-		if err != nil {
-			file.Close()
-			slog.Error("Error seeking to beginning of file", "filePath", filePath, "error", err)
-			return file, fileReader, err
-		}
+		fileReader.offset, err = file.Seek(0, io.SeekStart)
 	} else if config.StartFrom == START_FROM_END || config.StartFrom < 0 {
 		// Seek to end if file exists
-		_, err = file.Seek(0, 2)
-		if err != nil {
-			file.Close()
-			slog.Error("Error seeking to end of file", "filePath", filePath, "error", err)
-			return file, fileReader, err
-		}
+		fileReader.offset, err = file.Seek(0, io.SeekEnd)
 	} else {
 		//skip until the line
 		slog.Info("Skipping lines after opening file", "skippedLines", config.StartFrom)
-		fileReader = bufio.NewReaderSize(file, 8192)
+		fileReader.reader = bufio.NewReaderSize(file, 8192)
 		lineNo := 1
 		for {
-			_, err := fileReader.ReadString('\n')
+			skipped, readErr := fileReader.reader.ReadString('\n')
+			fileReader.offset += int64(len(skipped))
 			lineNo++
 			if lineNo >= config.StartFrom {
 				break
 			}
-			if err != nil {
+			if readErr != nil {
 				break
 			}
 		}
 	}
-
-	if fileReader == nil {
-		fileReader = bufio.NewReaderSize(file, 8192)
+	if err != nil {
+		file.Close()
+		slog.Error("Error seeking in file", "filePath", filePath, "error", err)
+		return nil, err
 	}
 
-	return file, fileReader, nil
+	if fileReader.reader == nil {
+		fileReader.reader = bufio.NewReaderSize(file, 8192)
+	}
+	fileReader.fingerprint = computeFileFingerprint(file, READ_POSITION_FINGERPRINT_MAX_LEN)
+
+	return fileReader, nil
 }
 
-func readFileToEnd(filePath string, lines chan<- string, fileReader *bufio.Reader) {
+/*
+Called after reaching the end of the file, before waiting for new data
+*/
+func (fileReader *monitoredFileReader) prepareForNewData(filePath string) {
+	truncated := false
+	if fileInfo, err := fileReader.file.Stat(); err == nil && fileInfo.Size() < fileReader.offset {
+		slog.Info("File was truncated, continuing from the beginning of the file", "filePath", filePath, "offset", fileReader.offset, "fileSize", fileInfo.Size())
+		fileReader.offset = 0
+		truncated = true
+	}
+	//all buffered data was consumed at EOF so this normally does not move the position. Not seeking to the end of the file
+	// because that would skip data appended after the last read
+	fileReader.file.Seek(fileReader.offset, io.SeekStart)
+	fileReader.reader.Reset(fileReader.file)
+	if truncated {
+		//content changed, readSingleLineReturnTrueIfEOF refreshes it as the file grows
+		fileReader.fingerprint = computeFileFingerprint(fileReader.file, READ_POSITION_FINGERPRINT_MAX_LEN)
+	}
+}
+
+func (fileReader *monitoredFileReader) readToEnd(filePath string, lines chan<- logLineToProcess) {
 	slog.Debug("Reading file to end ", "filePath", filePath)
 	for {
-		isEOF := readSingleLineFromFileReturnTrueIfEOF(filePath, lines, fileReader)
+		isEOF := fileReader.readSingleLineReturnTrueIfEOF(lines)
 		if isEOF {
 			slog.Debug("readFileToEnd done", "filePath", filePath)
 			return
@@ -988,15 +1130,21 @@ func readFileToEnd(filePath string, lines chan<- string, fileReader *bufio.Reade
 	}
 }
 
-func readSingleLineFromFileReturnTrueIfEOF(filePath string, lines chan<- string, fileReader *bufio.Reader) bool {
-	bytesRead, err := fileReader.ReadString('\n')
+func (fileReader *monitoredFileReader) readSingleLineReturnTrueIfEOF(lines chan<- logLineToProcess) bool {
+	bytesRead, err := fileReader.reader.ReadString('\n')
 	if len(bytesRead) > 0 {
-		theLine := strings.TrimSpace(string(bytesRead[:]))
-		//slog.Debug("Read line:", "filePath", filePath, "line", theLine)
-		lines <- theLine
+		fileReader.offset += int64(len(bytesRead))
+		//the fingerprint saved with a read position must cover the data up to the offset (or READ_POSITION_FINGERPRINT_MAX_LEN bytes),
+		// e.g the file may have been empty when it was opened, an empty fingerprint would match any file after a rotation
+		if fileReader.fingerprint.Len < READ_POSITION_FINGERPRINT_MAX_LEN && int64(fileReader.fingerprint.Len) < fileReader.offset {
+			fileReader.fingerprint = computeFileFingerprint(fileReader.file, READ_POSITION_FINGERPRINT_MAX_LEN)
+		}
+		theLine := strings.TrimSpace(bytesRead)
+		//slog.Debug("Read line:", "line", theLine)
+		lines <- logLineToProcess{line: theLine, endOffset: fileReader.offset, fingerprint: fileReader.fingerprint}
 	}
 	if err != nil {
-		//slog.Debug("fileReader error", "filePath", filePath, "error", err)
+		//slog.Debug("fileReader error", "error", err)
 		return io.EOF == err
 	}
 	return false
@@ -1041,6 +1189,7 @@ type ConfigForAMonitoredFile struct {
 	DbDatabase string
 	//when true then if a metric entry already exists the will be replaced,
 	// when false then if a metric entry already exists then the value will be added to the existing value
+	// Forced to false when SaveReadPosition is true or when multiple files are configured with the same DomainName
 	ReplaceExistingMetrics bool
 	//Only a limited number of most recent time window values will be kept active and others will be removed out of scope (and saved)
 	// e.g if we encounter logs for 202507021121 and 202507021122 and 202507021123 then we should be able to handle them
@@ -1065,6 +1214,14 @@ type ConfigForAMonitoredFile struct {
 	//OS metrics collection minutes. Only the following specific values are supported: Other values will be ignored. Defaults to 10
 	// supported values: 1, 5, 10, 15, 30, 60
 	OSMetricsIntervalMinutes int
+
+	//when true the read position (byte offset) in the file is saved periodically and when the program stops,
+	// and when the program is restarted processing continues from the saved position, StartFrom is ignored in that case.
+	// The saved position is ignored if the file was rotated or truncated in the meantime.
+	// Defaults to true when using a configuration file, false when the configuration is provided using command line parameters
+	SaveReadPosition bool
+	//directory for files storing read positions when SaveReadPosition is true. Defaults to the current working directory
+	ReadPositionDirectory string
 }
 
 /*

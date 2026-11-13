@@ -43,7 +43,7 @@ main.go
 ### Key domain types
 - `logparsers.SBOHttpRequestLog` — one parsed request line.
 - `logparsers.SBOUserAgent` — classification: `Family`, `OS`, `DeviceType`, `Human`, `Intent`.
-- `metrics.SBOMetricsManager` — holds a fixed-size window (`MetricsWindowSize`, 2–10) of time buckets per (file, metricType, keyValue). When a bucket falls out of the window it is emitted to be saved.
+- `metrics.SBOMetricsManager` — keeps up to `MetricsWindowSize` (2–10) most recent time windows **open per file** (not per key). `OpenTimeWindow` must be called once per log entry before `AddMetric`; when a newer window arrives the oldest is closed and the values of *all* metric types/keys for it are returned to be saved — exactly once. Entries for already-closed windows are rejected. `FlushAll` (called from `End()`) saves the still-open windows.
 - `main.ConfigForAMonitoredFile` — per-file config; the field comments at the bottom of `main.go` are the source of truth for config options.
 
 ## Build / test / run
@@ -69,6 +69,12 @@ into every file entry) and `--OS-metrics--` (host metrics collection). See `conf
 - Errors are generally logged and processing continues (best-effort stream processor); a bad log line should never crash the process.
 
 ## Gotchas / landmines (verify before trusting)
+- **Metrics vs raw logs consistency** (fixed 2026-11, see git history): each (metricType, key, window) must be emitted to the DB exactly once per run, because `ReplaceExistingMetrics=false` (additive) is forced when `SaveReadPosition` is on or several files share a `DomainName` (`validateAndAdjustConfig` in `main.go`). Don't add code paths that emit a partial window value and later the full value.
+- **Graceful shutdown**: SIGINT/SIGTERM closes `globalStopChannel`; producers stop, consumers drain and call handler `End()` (flushes open metric windows), then the read position is saved. A second signal exits immediately. Long-running goroutines must watch `globalStopChannel`, otherwise `wg.Wait()` in `main` hangs.
+- **Read position** (`readposition.go`): the producer sends `logLineToProcess{line, endOffset, fingerprint}`; the consumer records the offset after processing and saves it every 10s and at the end. On restart the saved offset is used only if the file still starts with the same bytes (fingerprint, which must always cover min(offset, 1KB) bytes) and isn't shorter than the offset. `SaveReadPosition` defaults to true for config files, false for command-line-only runs.
+- **Windows checkout uses CRLF** (`core.autocrlf=true`), so `gofmt -l .` flags every `.go` file there even when correctly formatted — check with `tr -d '\r' < f | gofmt -l` instead.
+- **`request_ts` in `sbo_rawlogs` is the log line's local wall time**, formatted as a string in `SaveRawLog` (the mysql driver would otherwise convert `time.Time` to UTC). Metric `time_window`s use the same local time — keep them consistent. Rows saved before 2026-11 are in UTC.
+- Raw logs use the domain parsed from the log line (vhost formats); metrics always use the configured `DomainName`. This mismatch is accepted.
 - **`go test ./...` fails on non-Linux** (`metrics` package): the OS-metrics tests shell out to `uptime`/`free`, which don't exist on Windows/macOS, and the test then nil-derefs the result. On Windows, test just `logparsers` (`go test ./logparsers/`) or expect that panic. This is a test/robustness bug, not your change breaking things.
 - Hot-path regexes in `logparsers` and `metrics` are now compiled once as package-level `var`s (fixed 2026-07). Keep it that way: never put `regexp.MustCompile` inside a per-line function — declare it at package scope.
 - **Format auto-detection** in `processSingleLogLine` uses `:=` inside the detection loop, which means the detection line (typically the first line of a file) is intentionally **not** processed. This is **deliberate** (skip a possible header line) — do not "fix" it to process the first line. (Latent nit: no `break`, so on the rare line matching multiple formats the last wins; harmless because the format regexes are mutually exclusive.)

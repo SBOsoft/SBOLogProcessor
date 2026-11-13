@@ -26,10 +26,22 @@ import (
 
 type SBOMetricMap map[int]map[string]*SBOMetric
 
+/*
+SBOMetricsManager aggregates metric values per (file, metricType, keyValue, timeWindow).
+
+For each file it keeps up to windowSize most recent time windows "open". When a log entry with a newer
+time window arrives and there are already windowSize open time windows, the oldest one is closed:
+values of ALL metrics (all types, all keys) for the closed time window are removed and returned to the caller
+to be saved. A time window is closed only once, so every (metricType, keyValue, timeWindow) value is returned
+at most once during the lifetime of the manager. Entries arriving after their time window was closed are rejected.
+*/
 type SBOMetricsManager struct {
-	allMetrics            map[string]SBOMetricMap
-	timeWindowTrackingMap map[string][]int64
-	windowSize            int
+	allMetrics map[string]SBOMetricMap
+	//per file: open time windows in ascending order, at most windowSize entries
+	openTimeWindows map[string][]int64
+	//per file: the most recent time window that was closed (and returned to be saved), 0 if none
+	lastClosedTimeWindow map[string]int64
+	windowSize           int
 }
 
 const SBO_METRIC_REQ_COUNT int = 1
@@ -47,11 +59,8 @@ const SBO_METRIC_IS_HUMAN int = 14
 const SBO_METRIC_REQUEST_INTENT int = 15
 
 type SBOMetric struct {
-	//for keeping track of keys in sorted order
-	keys       []int64 `json:"-"`
-	Values     map[int64]int64
-	keyCounter int
-	manager    *SBOMetricsManager `json:"-"`
+	//time window => metric value
+	Values map[int64]int64
 }
 
 type SBOMetricWindowDataToBeSaved struct {
@@ -73,14 +82,14 @@ func NewSBOMetricWindowDataToBeSaved(filePath string, metricType int, keyValue s
 }
 
 func NewSBOMetricsManager(timeWindowSize int) *SBOMetricsManager {
-
-	m := make(map[string]SBOMetricMap)
-	t := make(map[string][]int64, timeWindowSize+1)
-
+	if timeWindowSize < 1 {
+		timeWindowSize = 1
+	}
 	manager := SBOMetricsManager{
-		allMetrics:            m,
-		timeWindowTrackingMap: t,
-		windowSize:            timeWindowSize}
+		allMetrics:           make(map[string]SBOMetricMap),
+		openTimeWindows:      make(map[string][]int64),
+		lastClosedTimeWindow: make(map[string]int64),
+		windowSize:           timeWindowSize}
 
 	return &manager
 }
@@ -93,16 +102,50 @@ func (manager *SBOMetricsManager) GetAllMetricsForFile(filePath string) SBOMetri
 	return manager.allMetrics[filePath]
 }
 
-func NewSBOMetric(metricType int, key string, manager *SBOMetricsManager) *SBOMetric {
-	keys := make([]int64, manager.windowSize)
-	values := make(map[int64]int64, manager.windowSize)
-	return &SBOMetric{ /* metricType, key, */ keys, values, 0, manager}
+func NewSBOMetric() *SBOMetric {
+	return &SBOMetric{Values: make(map[int64]int64)}
 }
 
-func (manager *SBOMetricsManager) AddMetric(filePath string, metricType int, keyValue string, timeWindow int64, valueToAdd int64) *SBOMetricWindowDataToBeSaved {
+/*
+OpenTimeWindow must be called with the time window of a log entry before adding metrics for that entry.
+
+Returns accepted=false when the time window was already closed, e.g a log entry that arrived too late and is
+older than all open time windows. Metrics for such entries must not be added, they would never be saved.
+
+When opening a new time window causes the oldest open time window to be closed, the values of all metrics
+for the closed time window are returned so that the caller can save them.
+*/
+func (manager *SBOMetricsManager) OpenTimeWindow(filePath string, timeWindow int64) (bool, []*SBOMetricWindowDataToBeSaved) {
+	open := manager.openTimeWindows[filePath]
+	idx, found := slices.BinarySearch(open, timeWindow)
+	if found {
+		return true, nil
+	}
+	if timeWindow <= manager.lastClosedTimeWindow[filePath] || (len(open) >= manager.windowSize && idx == 0) {
+		//older than all open time windows and there is no room for it
+		return false, nil
+	}
+	open = slices.Insert(open, idx, timeWindow)
+
+	var closedData []*SBOMetricWindowDataToBeSaved
+	for len(open) > manager.windowSize {
+		closedData = append(closedData, manager.removeTimeWindow(filePath, open[0])...)
+		manager.lastClosedTimeWindow[filePath] = open[0]
+		open = open[1:]
+	}
+	manager.openTimeWindows[filePath] = open
+	slog.Debug("OpenTimeWindow", "filePath", filePath, "openTimeWindows", open, "closedDataCount", len(closedData))
+	return true, closedData
+}
+
+/*
+AddMetric adds valueToAdd to the metric value for the given time window.
+OpenTimeWindow must have been called, and must have returned true, for the time window before calling this method.
+*/
+func (manager *SBOMetricsManager) AddMetric(filePath string, metricType int, keyValue string, timeWindow int64, valueToAdd int64) {
 	mapForFile, ok := manager.allMetrics[filePath]
 	if !ok {
-		mapForFile = make(map[int]map[string]*SBOMetric)
+		mapForFile = make(SBOMetricMap)
 		manager.allMetrics[filePath] = mapForFile
 	}
 	keyMap, ok := mapForFile[metricType]
@@ -111,100 +154,44 @@ func (manager *SBOMetricsManager) AddMetric(filePath string, metricType int, key
 		mapForFile[metricType] = keyMap
 	}
 	sbom, ok := keyMap[keyValue]
-
 	if !ok {
-		sbom = NewSBOMetric(metricType, keyValue, manager)
+		sbom = NewSBOMetric()
 		keyMap[keyValue] = sbom
 	}
-	//note this is a bit weird. addValue returns the timewindow and metric value that is moved out of scope when the new value is added
-	// we have a fixed size window, when a new value is added oldest one is removed and returned by addValue
-	timeWindowToBeSavedAsItMovedOutOfScope, metricValueToBeSaved := sbom.addValue(filePath, timeWindow, valueToAdd)
-
-	if timeWindowToBeSavedAsItMovedOutOfScope > 0 {
-		return NewSBOMetricWindowDataToBeSaved(filePath, metricType, keyValue, timeWindowToBeSavedAsItMovedOutOfScope, metricValueToBeSaved)
-	} else {
-		return nil
-	}
-}
-
-func (sbm *SBOMetric) IncrementKeyCounter() {
-	sbm.keyCounter++
-}
-
-func (manager *SBOMetricsManager) CleanUpAllProcessKeyedValueTimeWindowTracking(filePath string, metricType int, dataToBeSavedChannel chan *SBOMetricWindowDataToBeSaved) {
-	for k, _ := range manager.allMetrics[filePath][metricType] {
-		manager.ProcessKeyedValueTimeWindowTracking(filePath, k, metricType, dataToBeSavedChannel)
-	}
-}
-
-func (manager *SBOMetricsManager) ProcessKeyedValueTimeWindowTracking(filePath string, keyValue string, metricType int, dataToBeSavedChannel chan *SBOMetricWindowDataToBeSaved) {
-	found := false
-	for _, tw := range manager.timeWindowTrackingMap[filePath] {
-		tw64 := int64(tw)
-		if manager.allMetrics[filePath][metricType][keyValue].Values[tw64] > 0 {
-			found = true
-			break
-		}
-	}
-
-	//this key value does not have an entry for one of the current timewindow values
-	//so move it out of scope
-	if !found {
-		//remove the keyed value
-		delete(manager.allMetrics[filePath][metricType], keyValue)
-		slog.Debug("Remove key value with no children in processKeyedValueTimeWindowTracking", "keyValue", keyValue, "metricType", metricType)
-	}
-}
-
-func (manager *SBOMetricsManager) doTimeWindowTracking(filePath string, timeWindow int64) {
-	if manager.timeWindowTrackingMap[filePath] == nil {
-		manager.timeWindowTrackingMap[filePath] = make([]int64, manager.windowSize+1)
-	}
-
-	if slices.Contains(manager.timeWindowTrackingMap[filePath], timeWindow) {
-		//nothing to do, it's already in
-		return
-	}
-	manager.timeWindowTrackingMap[filePath] = append(manager.timeWindowTrackingMap[filePath], timeWindow)
-	if len(manager.timeWindowTrackingMap[filePath]) >= manager.windowSize {
-		slices.Sort(manager.timeWindowTrackingMap[filePath])
-
-		//oldestTimewindow := timeWindowTrackingMap[filePath][0]
-		manager.timeWindowTrackingMap[filePath] = manager.timeWindowTrackingMap[filePath][1:]
-	}
-	slog.Debug("doTimeWindowTracking", "timeWindowTrackingMap[filePath]", manager.timeWindowTrackingMap[filePath])
-
+	sbom.Values[timeWindow] += valueToAdd
 }
 
 /*
-return timeWindow and the metric value for that timeWindow when the timeWindow is removed out of scope
-the caller may want to save the removed timeWindow and the metric value
+FlushAll closes all open time windows for the file and returns all remaining metric values, e.g when processing ends.
 */
-func (sbm *SBOMetric) addValue(filePath string, timeWindow int64, valueToAdd int64) (int64, int64) {
-	sbm.manager.doTimeWindowTracking(filePath, timeWindow)
-	var timeWindowToBeSaved int64 = 0
-	var metricValue int64 = 0
-	//	slog.Warn("timeWindow for timestamp", "timestamp", eventTimestamp, "timeWindow", timeWindow, "error", err)
-	if sbm.Values[timeWindow] < 1 {
-		sbm.keys[0] = timeWindow
-		slices.Sort(sbm.keys)
-		//after this sort, [0] will always be the smallest key value
-		if sbm.keyCounter >= sbm.manager.windowSize {
-			if sbm.keys[0] == timeWindow {
-				//don't add or save as the new timeWindow is less than existing items. e.g we received an old entry unexpectedly
-				//TODO report?
-				return 0, 0
-			} else {
-				//now remove the smallest item which is at keys[0]
-				metricValue = sbm.Values[sbm.keys[0]]
-				delete(sbm.Values, sbm.keys[0])
-				timeWindowToBeSaved = sbm.keys[0]
+func (manager *SBOMetricsManager) FlushAll(filePath string) []*SBOMetricWindowDataToBeSaved {
+	var rv []*SBOMetricWindowDataToBeSaved
+	open := manager.openTimeWindows[filePath]
+	for _, tw := range open {
+		rv = append(rv, manager.removeTimeWindow(filePath, tw)...)
+	}
+	if len(open) > 0 {
+		manager.lastClosedTimeWindow[filePath] = open[len(open)-1]
+	}
+	manager.openTimeWindows[filePath] = nil
+	return rv
+}
+
+// removes values for the time window from all metrics of the file and returns them. Keys left without values are removed
+func (manager *SBOMetricsManager) removeTimeWindow(filePath string, timeWindow int64) []*SBOMetricWindowDataToBeSaved {
+	var rv []*SBOMetricWindowDataToBeSaved
+	for metricType, keyMap := range manager.allMetrics[filePath] {
+		for keyValue, sbom := range keyMap {
+			metricValue, ok := sbom.Values[timeWindow]
+			if !ok {
+				continue
+			}
+			rv = append(rv, NewSBOMetricWindowDataToBeSaved(filePath, metricType, keyValue, timeWindow, metricValue))
+			delete(sbom.Values, timeWindow)
+			if len(sbom.Values) == 0 {
+				delete(keyMap, keyValue)
 			}
 		}
-		sbm.Values[timeWindow] = valueToAdd
-		sbm.IncrementKeyCounter()
-	} else {
-		sbm.Values[timeWindow] = sbm.Values[timeWindow] + valueToAdd
 	}
-	return timeWindowToBeSaved, metricValue
+	return rv
 }

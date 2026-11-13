@@ -19,7 +19,9 @@
         "ReplaceExistingMetrics":false,
         "SaveLogsToDb": true,
         "SaveLogsToDbMaskIPs": true,
-        "SaveLogsToDbOnlyRelevant": 1        
+        "SaveLogsToDbOnlyRelevant": 1,
+        "SaveReadPosition": true,
+        "ReadPositionDirectory": "."
     },
     "/var/log/apache2/access.log": {
         "Enabled": true,
@@ -31,7 +33,7 @@
         "Follow": true,
         "DomainName": "CHANGE_THIS.example.com",
         "HostId": 1,
-        "ReplaceExistingMetrics":true,
+        "ReplaceExistingMetrics":false,
         "SaveLogsToDbOnlyRelevant": 0
     },
     "--OS-metrics--": {

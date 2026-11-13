@@ -85,42 +85,49 @@ func (handler *MetricGeneratorHandler) PrintMetrics(filePath string) {
 // TODO decide how we will save generated metrics
 func (handler *MetricGeneratorHandler) HandleEntry(parsedLogEntry *logparsers.SBOHttpRequestLog) (bool, error) {
 	handler.handledEntryCounter++
-	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_REQ_COUNT, "", 1)
-	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_BYTES_SENT, "", int64(parsedLogEntry.BytesSent))
-	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_HTTP_STATUS, parsedLogEntry.Status, 1)
+	timeWindow := handler.calculateTimeWindow(parsedLogEntry.Timestamp)
+	//opening a new time window may close the oldest one, values for the closed time window must be saved
+	accepted, closedData := handler.metricsManager.OpenTimeWindow(handler.filePath, timeWindow)
+	handler.sendDataToBeSaved(closedData)
+	if !accepted {
+		//metrics for this time window were already saved, see MetricsWindowSize config option
+		slog.Debug("Ignoring log entry for metrics, its time window is already closed", "timestamp", parsedLogEntry.Timestamp, "timeWindow", timeWindow)
+		return false, nil
+	}
+
+	handler.handleSingleMetric(timeWindow, metrics.SBO_METRIC_REQ_COUNT, "", 1)
+	handler.handleSingleMetric(timeWindow, metrics.SBO_METRIC_BYTES_SENT, "", int64(parsedLogEntry.BytesSent))
+	handler.handleSingleMetric(timeWindow, metrics.SBO_METRIC_HTTP_STATUS, parsedLogEntry.Status, 1)
 
 	//TODO consider adding IPs or not. adding client IPs will create a metric entry for each IP address and would lead to excessive data
 	/*
-		handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_CLIENT_IP, parsedLogEntry.ClientIP, 1)
-		if handler.handledEntryCounter%50 == 0 {
-			handler.metricsManager.CleanUpAllProcessKeyedValueTimeWindowTracking(handler.filePath, metrics.SBO_METRIC_CLIENT_IP, handler.dataToBeSavedChannel)
-		}
+		handler.handleSingleMetric(timeWindow, metrics.SBO_METRIC_CLIENT_IP, parsedLogEntry.ClientIP, 1)
 	*/
 
-	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_METHOD, parsedLogEntry.Method, 1)
+	handler.handleSingleMetric(timeWindow, metrics.SBO_METRIC_METHOD, parsedLogEntry.Method, 1)
 
 	if len(parsedLogEntry.Referer) > 0 {
-		handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_REFERER, parsedLogEntry.Referer, 1)
+		handler.handleSingleMetric(timeWindow, metrics.SBO_METRIC_REFERER, parsedLogEntry.Referer, 1)
 	}
 
 	//add metrics for paths that return 2xx only. Ignoring others to save space, e.g scanners sending hundreds of paths
 	if len(parsedLogEntry.Status) > 0 && strings.HasPrefix(parsedLogEntry.Status, "2") {
 		//add metrics for the first 3 levels, e.g /a/b/c/d/f/x.html will generate 1 for /a 1 for /a/b and 1 for /a/b/c
 		// we don't add the full path as they may be too long and too many
-		handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_PATH, parsedLogEntry.Path1, 1)
+		handler.handleSingleMetric(timeWindow, metrics.SBO_METRIC_PATH, parsedLogEntry.Path1, 1)
 		if len(parsedLogEntry.Path2) > 0 {
-			handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_PATH, parsedLogEntry.Path2, 1)
+			handler.handleSingleMetric(timeWindow, metrics.SBO_METRIC_PATH, parsedLogEntry.Path2, 1)
 		}
 		if len(parsedLogEntry.Path3) > 0 {
-			handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_PATH, parsedLogEntry.Path3, 1)
+			handler.handleSingleMetric(timeWindow, metrics.SBO_METRIC_PATH, parsedLogEntry.Path3, 1)
 		}
 	}
 
-	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_UA_FAMILY, parsedLogEntry.UserAgent.Family, 1)
-	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_OS_FAMILY, parsedLogEntry.UserAgent.OS, 1)
-	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_DEVICE_TYPE, parsedLogEntry.UserAgent.DeviceType, 1)
-	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_IS_HUMAN, parsedLogEntry.UserAgent.Human, 1)
-	handler.handleSingleMetric(parsedLogEntry, metrics.SBO_METRIC_REQUEST_INTENT, parsedLogEntry.UserAgent.Intent, 1)
+	handler.handleSingleMetric(timeWindow, metrics.SBO_METRIC_UA_FAMILY, parsedLogEntry.UserAgent.Family, 1)
+	handler.handleSingleMetric(timeWindow, metrics.SBO_METRIC_OS_FAMILY, parsedLogEntry.UserAgent.OS, 1)
+	handler.handleSingleMetric(timeWindow, metrics.SBO_METRIC_DEVICE_TYPE, parsedLogEntry.UserAgent.DeviceType, 1)
+	handler.handleSingleMetric(timeWindow, metrics.SBO_METRIC_IS_HUMAN, parsedLogEntry.UserAgent.Human, 1)
+	handler.handleSingleMetric(timeWindow, metrics.SBO_METRIC_REQUEST_INTENT, parsedLogEntry.UserAgent.Intent, 1)
 
 	return true, nil
 }
@@ -157,26 +164,20 @@ func (handler *MetricGeneratorHandler) calculateTimeWindow(eventTimestamp time.T
 	return twInt64
 }
 
-func (handler *MetricGeneratorHandler) handleSingleMetric(parsedLogEntry *logparsers.SBOHttpRequestLog, metricType int, keyValue string, valueToAdd int64) {
-	timeWindow := handler.calculateTimeWindow(parsedLogEntry.Timestamp)
-	dataToBeSaved := handler.metricsManager.AddMetric(handler.filePath, metricType, keyValue, timeWindow, valueToAdd)
-	//dataToBeSaved is only available when a metric value is getting moved out of scope, this is NOT the new value we just added
-	if dataToBeSaved != nil {
+func (handler *MetricGeneratorHandler) handleSingleMetric(timeWindow int64, metricType int, keyValue string, valueToAdd int64) {
+	handler.metricsManager.AddMetric(handler.filePath, metricType, keyValue, timeWindow, valueToAdd)
+}
+
+func (handler *MetricGeneratorHandler) sendDataToBeSaved(data []*metrics.SBOMetricWindowDataToBeSaved) {
+	for _, dataToBeSaved := range data {
 		slog.Debug("Data to be saved", "data", dataToBeSaved)
 		handler.dataToBeSavedChannel <- dataToBeSaved
 	}
 }
 
 func (handler *MetricGeneratorHandler) End() bool {
-	remainingMetrics := handler.metricsManager.GetAllMetricsForFile(handler.filePath)
-	for metricType, metricData := range remainingMetrics {
-		for keyValue, values := range metricData {
-			for timeWindow, metricValue := range values.Values {
-				theData := metrics.NewSBOMetricWindowDataToBeSaved(handler.filePath, metricType, keyValue, timeWindow, metricValue)
-				handler.dataToBeSavedChannel <- theData
-			}
-		}
-	}
 	handler.PrintMetrics(handler.filePath)
+	//save values for all time windows that are still open
+	handler.sendDataToBeSaved(handler.metricsManager.FlushAll(handler.filePath))
 	return true
 }

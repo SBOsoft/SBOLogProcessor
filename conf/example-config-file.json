@@ -25,8 +25,10 @@
         "CounterOutputIntervalSeconds": 30,
         "SaveLogsToDb": true,
         "SaveLogsToDbMaskIPs": true,
-        "SaveLogsToDbOnlyRelevant": 0        
-    },    
+        "SaveLogsToDbOnlyRelevant": 0,
+        "SaveReadPosition": false,
+        "ReadPositionDirectory": ""
+    },
     "/var/log/apache2/COUNTER-example-access.log": {
         "Enabled": true,
         "FilePath": "/var/log/apache2/COUNTER-example-access.log",
@@ -59,6 +61,7 @@
         "ReplaceExistingMetrics":false,
         "SaveLogsToDb": true,
         "SaveLogsToDbMaskIPs": true,
-        "SaveLogsToDbOnlyRelevant": 1
+        "SaveLogsToDbOnlyRelevant": 1,
+        "SaveReadPosition": true
     }
 }

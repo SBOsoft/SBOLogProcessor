@@ -92,13 +92,14 @@ func (sbol *SBOHttpRequestLog) SBOHttpRequestLogSetUserAgent(userAgent string) {
 func (sbol *SBOHttpRequestLog) SBOHttpRequestLogSetReferer(referer string, requestUri string) {
 	//sbol.Referer = referer
 	match := reUtmSource.FindStringSubmatch(requestUri)
+	//lower case, so that e.g Facebook and facebook are counted as the same referer
 	if len(match) > 0 {
-		sbol.Referer = match[2]
+		sbol.Referer = strings.ToLower(match[2])
 	} else if len(referer) > 0 {
 		parsed, err := url.Parse(referer)
 
 		if err == nil {
-			sbol.Referer = parsed.Hostname()
+			sbol.Referer = strings.ToLower(parsed.Hostname())
 			sbol.Referer = strings.TrimPrefix(sbol.Referer, "www.")
 		}
 	}

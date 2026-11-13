@@ -31,6 +31,8 @@ import (
 	"github.com/SBOsoft/SBOLogProcessor/metrics"
 )
 
+const MYSQL_DATETIME_FORMAT string = "2006-01-02 15:04:05"
+
 type SBOAnalyticsDB struct {
 	DbInstance     *sql.DB
 	IsInitialized  bool
@@ -173,6 +175,9 @@ func (sboadb *SBOAnalyticsDB) SaveRawLog(data *logparsers.SBOHttpRequestLog, dom
 		"?, ?, ?, ?, ?, ?) "
 
 	var err error = nil
+	//save the local time as it appears in the log line, NOT converted to UTC (the mysql driver converts time.Time values to UTC by default)
+	// metric time windows are calculated using the same local time, so logs and metrics for a time window must match
+	requestTs := data.Timestamp.Format(MYSQL_DATETIME_FORMAT)
 	pathUpTo3rd := data.Path3
 	if len(pathUpTo3rd) < 1 {
 		pathUpTo3rd = data.Path2
@@ -182,7 +187,7 @@ func (sboadb *SBOAnalyticsDB) SaveRawLog(data *logparsers.SBOHttpRequestLog, dom
 	}
 
 	if !maskIPs {
-		_, err = sboadb.DbInstance.Exec(sql, domainId, hostId, data.Timestamp, data.ClientIP,
+		_, err = sboadb.DbInstance.Exec(sql, domainId, hostId, requestTs, data.ClientIP,
 			ReduceToMaxColumnLen(data.RemoteUser, 100),
 			ReduceToMaxColumnLen(data.Method, 20),
 			ReduceToMaxColumnLen(pathUpTo3rd, 100),
@@ -197,7 +202,7 @@ func (sboadb *SBOAnalyticsDB) SaveRawLog(data *logparsers.SBOHttpRequestLog, dom
 			ReduceToMaxColumnLen(data.UserAgent.Human, 20),
 			ReduceToMaxColumnLen(data.UserAgent.Intent, 20))
 	} else {
-		_, err = sboadb.DbInstance.Exec(sql, domainId, hostId, data.Timestamp,
+		_, err = sboadb.DbInstance.Exec(sql, domainId, hostId, requestTs,
 			ReduceToMaxColumnLen(data.RemoteUser, 100),
 			ReduceToMaxColumnLen(data.Method, 20),
 			ReduceToMaxColumnLen(pathUpTo3rd, 100),

@@ -24,3 +24,7 @@ go.work.sum
 # env file
 .env
 test-data
+
+# read position state files (SaveReadPosition config option)
+sbologp-readpos-*.json
+sbologp-readpos-*.json.tmp

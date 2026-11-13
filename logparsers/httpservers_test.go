@@ -309,4 +309,20 @@ func TestParseReferer(t *testing.T) {
 		}
 	}
 
+	//referers are lower cased
+	{
+		line1 := `149.102.254.35 - - [23/May/2025:03:53:41 +0000] "GET /a.html HTTP/1.1" 200 549 "https://WWW.CasualGames.dev/b.html" "Go-http-client/1.1"`
+		parsed, _ := ParseApacheCombinedLogFormat(line1)
+		if parsed.Referer != "casualgames.dev" {
+			t.Errorf("Expected %v, got %v", "casualgames.dev", parsed.Referer)
+		}
+	}
+	{
+		line1 := `149.102.254.35 - - [23/May/2025:03:53:41 +0000] "GET /a.html?utm_source=Newsletter HTTP/1.1" 200 549 "-" "Go-http-client/1.1"`
+		parsed, _ := ParseApacheCombinedLogFormat(line1)
+		if parsed.Referer != "newsletter" {
+			t.Errorf("Expected %v, got %v", "newsletter", parsed.Referer)
+		}
+	}
+
 }
