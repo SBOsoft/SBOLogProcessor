@@ -20,10 +20,15 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 package db
 
 import (
+	"cmp"
 	"database/sql"
+	"errors"
 	"log/slog"
 	"runtime/debug"
+	"slices"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-sql-driver/mysql"
 
@@ -104,14 +109,21 @@ func (sboadb *SBOAnalyticsDB) GetDomainId(domainName string, timeWindowSizeInMin
 	if err != nil {
 		//exists? try to select
 		var domainId int
-		row := sboadb.DbInstance.QueryRow("SELECT domain_id FROM sbo_domains WHERE domain_name = ?", domainName)
-		err := row.Scan(&domainId)
+		var savedTimeWindowSizeMinutes int
+		row := sboadb.DbInstance.QueryRow("SELECT domain_id, timeWindowSizeMinutes FROM sbo_domains WHERE domain_name = ?", domainName)
+		err := row.Scan(&domainId, &savedTimeWindowSizeMinutes)
 		if err != nil {
 			if err == sql.ErrNoRows {
 				slog.Error("Unexpected error. db.GetDomainId could not create a new domain but selecting the existing record also failed", "domainName", domainName)
 			}
 			return -1, err
 		} else {
+			if savedTimeWindowSizeMinutes != timeWindowSizeInMinutes {
+				//SBOanalytics uses the saved value e.g for links from metrics to logs
+				slog.Warn("TimeWindowSizeMinutes in the configuration is different from the value saved for the domain in the database (sbo_domains.timeWindowSizeMinutes). "+
+					"Update the database record if you changed TimeWindowSizeMinutes intentionally",
+					"domainName", domainName, "configured", timeWindowSizeInMinutes, "savedInDb", savedTimeWindowSizeMinutes)
+			}
 			sboadb.domainIdsCache[domainName] = domainId
 			return domainId, nil
 		}
@@ -143,21 +155,95 @@ func (sboadb *SBOAnalyticsDB) GetFileId(domainId int, hostname string, filePath 
 	}
 }
 
-func (sboadb *SBOAnalyticsDB) SaveMetricData(data *metrics.SBOMetricWindowDataToBeSaved, domainId int, replaceIfExists bool) (bool, error) {
-	var sql string = "INSERT INTO sbo_metrics (domain_id, metric_type, key_value, time_window, metric_value, created) " +
-		" VALUES (?, ?, ?, ?, ?, now()) "
+// max number of rows in a single multi-row insert statement
+const SAVE_METRIC_DATA_BATCH_SIZE int = 500
+
+/*
+Saves metric values using multi-row insert statements. When replaceIfExists is false values are added to existing values.
+If the same metric (type, key, time window) appears more than once in data, values are applied in order,
+i.e they are summed when replaceIfExists is false and the last one wins when replaceIfExists is true.
+*/
+func (sboadb *SBOAnalyticsDB) SaveMetricDataBatch(data []*metrics.SBOMetricWindowDataToBeSaved, domainId int, replaceIfExists bool) (bool, error) {
+	//rows are written in primary key order so that concurrent writers (e.g multiple files for the same domain)
+	// lock rows in the same order, which avoids deadlocks
+	sorted := sortInPrimaryKeyOrder(data)
+	var firstErr error
+	for start := 0; start < len(sorted); start += SAVE_METRIC_DATA_BATCH_SIZE {
+		end := min(start+SAVE_METRIC_DATA_BATCH_SIZE, len(sorted))
+		batch := sorted[start:end]
+		sql, args := buildSaveMetricDataBatchStatement(batch, domainId, replaceIfExists)
+		err := execWithRetry(sboadb.DbInstance, sql, args)
+		if err != nil {
+			slog.Error("SaveMetricDataBatch failed, metric values are lost", "domainId", domainId, "rowCount", len(batch), "error", err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr == nil, firstErr
+}
+
+// returns a copy sorted by (metric type, time window, key), i.e the primary key order of sbo_metrics.
+// The sort is stable so rows for the same metric keep their order, which matters when replaceIfExists is true
+func sortInPrimaryKeyOrder(data []*metrics.SBOMetricWindowDataToBeSaved) []*metrics.SBOMetricWindowDataToBeSaved {
+	sorted := slices.Clone(data)
+	slices.SortStableFunc(sorted, func(a, b *metrics.SBOMetricWindowDataToBeSaved) int {
+		if c := cmp.Compare(a.MetricType, b.MetricType); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.TimeWindow, b.TimeWindow); c != 0 {
+			return c
+		}
+		return strings.Compare(ReduceToMaxColumnLen(a.KeyValue, 100), ReduceToMaxColumnLen(b.KeyValue, 100))
+	})
+	return sorted
+}
+
+const SAVE_METRIC_DATA_MAX_ATTEMPTS int = 3
+
+/*
+Retries statements failing because of deadlocks (1213) or lock wait timeouts (1205). The failing statement is rolled back
+by mysql in both cases so it is safe to execute it again, even when it adds to existing values.
+Other errors are not retried, e.g after a connection error it is unknown whether the statement was executed or not.
+*/
+func execWithRetry(dbInstance *sql.DB, statement string, args []any) error {
+	var err error
+	for attempt := 1; attempt <= SAVE_METRIC_DATA_MAX_ATTEMPTS; attempt++ {
+		_, err = dbInstance.Exec(statement, args...)
+		if err == nil || !isRetryableError(err) {
+			return err
+		}
+		slog.Warn("Retrying db statement after a deadlock or lock wait timeout", "attempt", attempt, "error", err)
+		time.Sleep(time.Duration(attempt*attempt) * 100 * time.Millisecond)
+	}
+	return err
+}
+
+func isRetryableError(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) {
+		return mysqlErr.Number == 1213 || mysqlErr.Number == 1205
+	}
+	return false
+}
+
+func buildSaveMetricDataBatchStatement(batch []*metrics.SBOMetricWindowDataToBeSaved, domainId int, replaceIfExists bool) (string, []any) {
+	var sb strings.Builder
+	sb.WriteString("INSERT INTO sbo_metrics (domain_id, metric_type, key_value, time_window, metric_value, created) VALUES ")
+	args := make([]any, 0, len(batch)*5)
+	for i, d := range batch {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString("(?, ?, ?, ?, ?, now())")
+		args = append(args, domainId, d.MetricType, ReduceToMaxColumnLen(d.KeyValue, 100), d.TimeWindow, d.MetricValue)
+	}
 	if replaceIfExists {
-		sql += "ON DUPLICATE KEY UPDATE metric_value=VALUES(metric_value)"
+		sb.WriteString(" ON DUPLICATE KEY UPDATE metric_value=VALUES(metric_value)")
 	} else {
-		sql += "ON DUPLICATE KEY UPDATE metric_value=metric_value+VALUES(metric_value)"
+		sb.WriteString(" ON DUPLICATE KEY UPDATE metric_value=metric_value+VALUES(metric_value)")
 	}
-	_, err := sboadb.DbInstance.Exec(sql, domainId, data.MetricType, ReduceToMaxColumnLen(data.KeyValue, 100), data.TimeWindow, data.MetricValue)
-	if err != nil {
-		slog.Error("SaveMetricData failed", "domainId", domainId, "data.FilePath", data.FilePath, "error", err)
-		return false, err
-	} else {
-		return true, nil
-	}
+	return sb.String(), args
 }
 
 func (sboadb *SBOAnalyticsDB) SaveRawLog(data *logparsers.SBOHttpRequestLog, domainId int, hostId int, maskIPs bool) (bool, error) {

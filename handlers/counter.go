@@ -74,7 +74,7 @@ type CounterHandler struct {
 	RequestedPaths      map[string]*CounterValue
 	RequestIntents      map[string]*CounterValue
 
-	dataToBeSavedChannel chan *metrics.SBOMetricWindowDataToBeSaved
+	dataToBeSavedChannel metrics.DataToBeSavedChannel
 
 	isFollowing    bool
 	ticker         *time.Ticker
@@ -110,7 +110,7 @@ func (handler *CounterHandler) Name() string {
 	return COUNTER_HANDLER_NAME
 }
 
-func (handler *CounterHandler) Begin(dataToSaveChan chan *metrics.SBOMetricWindowDataToBeSaved,
+func (handler *CounterHandler) Begin(dataToSaveChan metrics.DataToBeSavedChannel,
 	following bool,
 	outputIntervalSeconds int,
 	topNSize int) error {

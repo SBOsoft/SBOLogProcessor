@@ -21,27 +21,49 @@ package metrics
 
 import (
 	"log/slog"
-	"slices"
+	"time"
 )
 
-type SBOMetricMap map[int]map[string]*SBOMetric
-
 /*
-SBOMetricsManager aggregates metric values per (file, metricType, keyValue, timeWindow).
+SBOMetricsManager aggregates metric values per (file, time window, metricType, keyValue).
 
-For each file it keeps up to windowSize most recent time windows "open". When a log entry with a newer
-time window arrives and there are already windowSize open time windows, the oldest one is closed:
-values of ALL metrics (all types, all keys) for the closed time window are removed and returned to the caller
-to be saved. A time window is closed only once, so every (metricType, keyValue, timeWindow) value is returned
-at most once during the lifetime of the manager. Entries arriving after their time window was closed are rejected.
+Everything is based on timestamps read from the logs, never on the current clock, so that old log files can be processed
+in bulk exactly like live logs. The current clock is only used by callers to decide when to call CollectDataToBeSaved.
+
+The watermark is the latest log timestamp seen. A time window is closed when the watermark passes the end of the time window
+plus allowedLateness, then values not saved yet are returned to be saved and the time window is removed from memory.
+Values are also returned periodically, see CollectDataToBeSaved, and when processing ends, see FlushAll.
+
+When replaceExistingMetrics is false (the normal case) the returned values are increments since the last time the
+value was returned, i.e every value added to the manager is returned exactly once and must be added to the saved values.
+Log entries arriving after their time window was closed (late entries) open the time window again and their values
+are returned as increments.
+
+When replaceExistingMetrics is true the returned values are totals that must replace the saved values.
+Late entries for time windows that were closed are rejected, their totals would replace the complete totals saved earlier.
+
+Log timestamps more than JUMP_THRESHOLD ahead of the watermark move the watermark only when JUMP_CONFIRMATION_LINES
+consecutive lines are that far ahead (e.g a gap in traffic), so that a few log lines with wrong timestamps can't close current
+time windows. Time windows opened by unconfirmed jumps and late entries are "flagged" and closed early (see FLAGGED_TIME_WINDOW_GRACE),
+so that they don't stay in memory. The number of open time windows is limited, see maxOpenTimeWindows.
 */
 type SBOMetricsManager struct {
-	allMetrics map[string]SBOMetricMap
-	//per file: open time windows in ascending order, at most windowSize entries
-	openTimeWindows map[string][]int64
-	//per file: the most recent time window that was closed (and returned to be saved), 0 if none
-	lastClosedTimeWindow map[string]int64
-	windowSize           int
+	files map[string]*fileMetrics
+
+	timeWindowSizeMinutes  int
+	allowedLateness        time.Duration
+	maxOpenTimeWindows     int
+	replaceExistingMetrics bool
+	maxKeysPerWindow       int
+}
+
+type SBOMetricsManagerOptions struct {
+	//time windows are kept open for max((MetricsWindowSize-1) time window durations, MIN_ALLOWED_LATENESS) after the end of the time window
+	MetricsWindowSize      int
+	TimeWindowSizeMinutes  int
+	ReplaceExistingMetrics bool
+	//when > 0, keys exceeding this number for a metric type and a time window are counted under SBO_METRIC_KEY_OTHER
+	MaxKeysPerWindow int
 }
 
 const SBO_METRIC_REQ_COUNT int = 1
@@ -58,11 +80,42 @@ const SBO_METRIC_DEVICE_TYPE int = 13
 const SBO_METRIC_IS_HUMAN int = 14
 const SBO_METRIC_REQUEST_INTENT int = 15
 
-type SBOMetric struct {
-	//time window => metric value
-	Values map[int64]int64
-}
+// key used for values of keys exceeding MaxKeysPerWindow
+const SBO_METRIC_KEY_OTHER string = "--other--"
 
+const TIME_WINDOW_SIZE_MINUTES_DEFAULT int = 10
+
+// time windows are kept open at least this long after they end (log time)
+const MIN_ALLOWED_LATENESS time.Duration = 10 * time.Minute
+
+// log timestamps more than this ahead of the watermark are treated as a possible jump, see JUMP_CONFIRMATION_LINES.
+// Must be less than MIN_ALLOWED_LATENESS so that an unconfirmed jump can't close time windows that are still in use
+const JUMP_THRESHOLD time.Duration = 5 * time.Minute
+
+// number of consecutive log lines that must be more than JUMP_THRESHOLD ahead of the watermark to move it
+const JUMP_CONFIRMATION_LINES int = 3
+
+// flagged time windows (late entries, unconfirmed jumps) are closed when the watermark moves this much (log time)
+// after they were flagged, or on the next CollectDataToBeSaved call, whichever is first
+const FLAGGED_TIME_WINDOW_GRACE time.Duration = 1 * time.Minute
+
+type TimeWindowStatus int
+
+const (
+	TIME_WINDOW_ACCEPTED TimeWindowStatus = iota
+	//late entry, the time window was already closed or expired. The entry is accepted and its values will be added to saved values
+	TIME_WINDOW_REOPENED
+	//late entry, the time window was already closed and saved. The entry must be ignored for metrics. Only when replaceExistingMetrics is true
+	TIME_WINDOW_REJECTED
+)
+
+// channel for passing data to be saved, each message is a batch
+type DataToBeSavedChannel = chan []*SBOMetricWindowDataToBeSaved
+
+/*
+MetricValue is an increment to be added to the saved value or, when ReplaceExistingMetrics is true, the total value
+that must replace the saved value
+*/
 type SBOMetricWindowDataToBeSaved struct {
 	DomainName  string
 	FilePath    string
@@ -81,117 +134,414 @@ func NewSBOMetricWindowDataToBeSaved(filePath string, metricType int, keyValue s
 	return &rv
 }
 
-func NewSBOMetricsManager(timeWindowSize int) *SBOMetricsManager {
-	if timeWindowSize < 1 {
-		timeWindowSize = 1
+type SBOMetricValue struct {
+	//total value since the time window was opened
+	Value int64
+	//value added since the last time it was returned to be saved
+	unsaved int64
+	//changed since the last time it was returned to be saved
+	dirty bool
+}
+
+// a value that changed since it was last returned to be saved
+type dirtyMetricValue struct {
+	metricType int
+	keyValue   string
+	value      *SBOMetricValue
+}
+
+type openTimeWindow struct {
+	timeWindow int64
+	end        time.Time
+	//closed when the watermark reaches this, unless flagged
+	closeAt time.Time
+	//opened by a late entry (only when replaceExistingMetrics is false)
+	reopened bool
+	//opened by a log entry that is part of an unconfirmed jump
+	outlier bool
+	//when flagged (reopened or outlier, only when replaceExistingMetrics is false) closed when the watermark reaches this
+	flaggedCloseAt time.Time
+	//metric type => key => value
+	values map[int]map[string]*SBOMetricValue
+	//metric type => number of keys, used only when maxKeysPerWindow > 0
+	keyCounts map[int]int
+	//values that changed since they were last returned, in the order they changed
+	dirty []dirtyMetricValue
+}
+
+type fileMetrics struct {
+	openTimeWindows map[int64]*openTimeWindow
+	//time windows closed recently => end of the time window. Used to reject late entries in replace mode
+	closedTimeWindows map[int64]time.Time
+	//latest log timestamp seen, zero until the first log entry
+	watermark time.Time
+	//consecutive log entries more than JUMP_THRESHOLD ahead of the watermark and the earliest of their timestamps
+	pendingJumpCount    int
+	pendingJumpEarliest time.Time
+	//the earliest time (watermark) at which an open time window must be closed, zero if there are no open time windows
+	nextCloseCheck time.Time
+}
+
+// returns true if the time window size is supported, i.e 1, 5, 10, 15, 30, 60 minutes
+func IsSupportedTimeWindowSizeMinutes(minutes int) bool {
+	switch minutes {
+	case 1, 5, 10, 15, 30, 60:
+		return true
 	}
+	return false
+}
+
+// returns TIME_WINDOW_SIZE_MINUTES_DEFAULT for unsupported values
+func NormalizeTimeWindowSizeMinutes(minutes int) int {
+	if IsSupportedTimeWindowSizeMinutes(minutes) {
+		return minutes
+	}
+	return TIME_WINDOW_SIZE_MINUTES_DEFAULT
+}
+
+// returns the time window as a yyyyMMddHHmm number, e.g 202507061130, using the local time of the timestamp as it appears in the log
+func timeWindowNumber(timestamp time.Time, sizeMinutes int) (int64, int) {
+	year, month, day := timestamp.Date()
+	hour, minute, _ := timestamp.Clock()
+	minuteStart := minute - (minute % sizeMinutes)
+	return int64(year)*100000000 + int64(month)*1000000 + int64(day)*10000 + int64(hour)*100 + int64(minuteStart), minuteStart
+}
+
+func timeWindowEnd(timestamp time.Time, minuteStart int, sizeMinutes int) time.Time {
+	year, month, day := timestamp.Date()
+	return time.Date(year, month, day, timestamp.Hour(), minuteStart, 0, 0, timestamp.Location()).Add(time.Duration(sizeMinutes) * time.Minute)
+}
+
+/*
+Returns the time window for the timestamp as a yyyyMMddHHmm number, e.g 202507061130, and the end of the time window.
+Time windows use the local time of the timestamp (i.e as it appears in the log line).
+*/
+func CalculateTimeWindow(timestamp time.Time, timeWindowSizeMinutes int) (int64, time.Time) {
+	sizeMinutes := NormalizeTimeWindowSizeMinutes(timeWindowSizeMinutes)
+	tw, minuteStart := timeWindowNumber(timestamp, sizeMinutes)
+	return tw, timeWindowEnd(timestamp, minuteStart, sizeMinutes)
+}
+
+func NewSBOMetricsManager(options SBOMetricsManagerOptions) *SBOMetricsManager {
+	windowSize := max(options.MetricsWindowSize, 1)
+	sizeMinutes := NormalizeTimeWindowSizeMinutes(options.TimeWindowSizeMinutes)
+	sizeDuration := time.Duration(sizeMinutes) * time.Minute
+	allowedLateness := max(time.Duration(windowSize-1)*sizeDuration, MIN_ALLOWED_LATENESS)
 	manager := SBOMetricsManager{
-		allMetrics:           make(map[string]SBOMetricMap),
-		openTimeWindows:      make(map[string][]int64),
-		lastClosedTimeWindow: make(map[string]int64),
-		windowSize:           timeWindowSize}
+		files:                  make(map[string]*fileMetrics),
+		timeWindowSizeMinutes:  sizeMinutes,
+		allowedLateness:        allowedLateness,
+		maxOpenTimeWindows:     int(allowedLateness/sizeDuration) + 4,
+		replaceExistingMetrics: options.ReplaceExistingMetrics,
+		maxKeysPerWindow:       options.MaxKeysPerWindow}
 
 	return &manager
 }
 
-func (manager *SBOMetricsManager) GetAllMetrics() map[string]SBOMetricMap {
-	return manager.allMetrics
-}
-
-func (manager *SBOMetricsManager) GetAllMetricsForFile(filePath string) SBOMetricMap {
-	return manager.allMetrics[filePath]
-}
-
-func NewSBOMetric() *SBOMetric {
-	return &SBOMetric{Values: make(map[int64]int64)}
+func (manager *SBOMetricsManager) fileMetricsFor(filePath string) *fileMetrics {
+	fm := manager.files[filePath]
+	if fm == nil {
+		fm = &fileMetrics{
+			openTimeWindows:   make(map[int64]*openTimeWindow),
+			closedTimeWindows: make(map[int64]time.Time)}
+		manager.files[filePath] = fm
+	}
+	return fm
 }
 
 /*
-OpenTimeWindow must be called with the time window of a log entry before adding metrics for that entry.
-
-Returns accepted=false when the time window was already closed, e.g a log entry that arrived too late and is
-older than all open time windows. Metrics for such entries must not be added, they would never be saved.
-
-When opening a new time window causes the oldest open time window to be closed, the values of all metrics
-for the closed time window are returned so that the caller can save them.
+Returns current values of open time windows as metricType => keyValue => SBOMetric{timeWindow => value}, e.g for printing
 */
-func (manager *SBOMetricsManager) OpenTimeWindow(filePath string, timeWindow int64) (bool, []*SBOMetricWindowDataToBeSaved) {
-	open := manager.openTimeWindows[filePath]
-	idx, found := slices.BinarySearch(open, timeWindow)
-	if found {
-		return true, nil
+func (manager *SBOMetricsManager) GetAllMetricsForFile(filePath string) SBOMetricMap {
+	rv := make(SBOMetricMap)
+	fm := manager.files[filePath]
+	if fm == nil {
+		return rv
 	}
-	if timeWindow <= manager.lastClosedTimeWindow[filePath] || (len(open) >= manager.windowSize && idx == 0) {
-		//older than all open time windows and there is no room for it
-		return false, nil
+	for timeWindow, tw := range fm.openTimeWindows {
+		for metricType, keys := range tw.values {
+			if rv[metricType] == nil {
+				rv[metricType] = make(map[string]*SBOMetric)
+			}
+			for keyValue, value := range keys {
+				if rv[metricType][keyValue] == nil {
+					rv[metricType][keyValue] = &SBOMetric{Values: make(map[int64]int64)}
+				}
+				rv[metricType][keyValue].Values[timeWindow] = value.Value
+			}
+		}
 	}
-	open = slices.Insert(open, idx, timeWindow)
+	return rv
+}
+
+type SBOMetricMap map[int]map[string]*SBOMetric
+
+type SBOMetric struct {
+	//time window => value
+	Values map[int64]int64
+}
+
+/*
+OpenTimeWindow must be called with the timestamp of a log entry before adding metrics for that entry.
+Returns the time window for the timestamp, the status of the time window and values to be saved for
+time windows that were closed. Metrics must not be added when the status is TIME_WINDOW_REJECTED.
+*/
+func (manager *SBOMetricsManager) OpenTimeWindow(filePath string, timestamp time.Time) (int64, TimeWindowStatus, []*SBOMetricWindowDataToBeSaved) {
+	fm := manager.fileMetricsFor(filePath)
+	timeWindow, minuteStart := timeWindowNumber(timestamp, manager.timeWindowSizeMinutes)
+	isOutlier := manager.advanceWatermark(fm, timestamp)
 
 	var closedData []*SBOMetricWindowDataToBeSaved
-	for len(open) > manager.windowSize {
-		closedData = append(closedData, manager.removeTimeWindow(filePath, open[0])...)
-		manager.lastClosedTimeWindow[filePath] = open[0]
-		open = open[1:]
+	if !fm.nextCloseCheck.IsZero() && !fm.watermark.Before(fm.nextCloseCheck) {
+		closedData = manager.closeDueTimeWindows(filePath, fm, false)
 	}
-	manager.openTimeWindows[filePath] = open
-	slog.Debug("OpenTimeWindow", "filePath", filePath, "openTimeWindows", open, "closedDataCount", len(closedData))
-	return true, closedData
+
+	if _, isOpen := fm.openTimeWindows[timeWindow]; isOpen {
+		return timeWindow, TIME_WINDOW_ACCEPTED, closedData
+	}
+
+	end := timeWindowEnd(timestamp, minuteStart, manager.timeWindowSizeMinutes)
+	status := TIME_WINDOW_ACCEPTED
+	_, wasClosed := fm.closedTimeWindows[timeWindow]
+	expired := !end.Add(manager.allowedLateness).After(fm.watermark)
+	if wasClosed || expired {
+		if manager.replaceExistingMetrics {
+			//a time window that expired long ago may have been closed and saved, closedTimeWindows keeps recently closed ones only
+			beyondHorizon := !end.Add(2 * manager.allowedLateness).After(fm.watermark)
+			if wasClosed || beyondHorizon {
+				return timeWindow, TIME_WINDOW_REJECTED, closedData
+			}
+			//never saved, its total can be saved. It will be closed in the next check
+		} else if expired {
+			status = TIME_WINDOW_REOPENED
+		}
+		//else: closed early (flagged or too many open time windows) but still current, open it again as a normal time window
+	}
+
+	tw := &openTimeWindow{
+		timeWindow: timeWindow,
+		end:        end,
+		closeAt:    end.Add(manager.allowedLateness),
+		values:     make(map[int]map[string]*SBOMetricValue)}
+	if !manager.replaceExistingMetrics && (status == TIME_WINDOW_REOPENED || isOutlier) {
+		tw.reopened = status == TIME_WINDOW_REOPENED
+		tw.outlier = isOutlier
+		tw.flaggedCloseAt = fm.watermark.Add(FLAGGED_TIME_WINDOW_GRACE)
+	} else if isOutlier {
+		//replace mode, close normally, but it is preferred when the open time window limit is exceeded
+		tw.outlier = true
+	}
+	fm.openTimeWindows[timeWindow] = tw
+	manager.updateNextCloseCheck(fm, tw)
+	if len(fm.openTimeWindows) > manager.maxOpenTimeWindows {
+		closedData = append(closedData, manager.closeExcessTimeWindows(filePath, fm, timeWindow)...)
+	}
+	return timeWindow, status, closedData
+}
+
+// returns true if the timestamp is part of an unconfirmed jump, i.e it did not move the watermark
+func (manager *SBOMetricsManager) advanceWatermark(fm *fileMetrics, timestamp time.Time) bool {
+	if fm.watermark.IsZero() {
+		fm.watermark = timestamp
+		return false
+	}
+	if !timestamp.After(fm.watermark.Add(JUMP_THRESHOLD)) {
+		fm.pendingJumpCount = 0
+		if timestamp.After(fm.watermark) {
+			fm.watermark = timestamp
+		}
+		return false
+	}
+	if fm.pendingJumpCount == 0 || timestamp.Before(fm.pendingJumpEarliest) {
+		fm.pendingJumpEarliest = timestamp
+	}
+	fm.pendingJumpCount++
+	if fm.pendingJumpCount < JUMP_CONFIRMATION_LINES {
+		return true
+	}
+	//confirmed, e.g a gap in traffic. Time windows opened by the jump are normal time windows now
+	slog.Debug("Log timestamps jumped forward", "from", fm.watermark, "to", fm.pendingJumpEarliest)
+	fm.watermark = fm.pendingJumpEarliest
+	fm.pendingJumpCount = 0
+	for _, tw := range fm.openTimeWindows {
+		if tw.outlier {
+			tw.outlier = false
+			tw.flaggedCloseAt = time.Time{}
+		}
+	}
+	fm.nextCloseCheck = time.Time{}
+	for _, tw := range fm.openTimeWindows {
+		manager.updateNextCloseCheck(fm, tw)
+	}
+	return false
+}
+
+func (manager *SBOMetricsManager) isFlagged(tw *openTimeWindow) bool {
+	return !tw.flaggedCloseAt.IsZero()
+}
+
+// flagged time windows are closed at flaggedCloseAt: for late entries closeAt has already passed and for outliers it is too far
+func (manager *SBOMetricsManager) closeTimeFor(tw *openTimeWindow) time.Time {
+	if manager.isFlagged(tw) {
+		return tw.flaggedCloseAt
+	}
+	return tw.closeAt
+}
+
+func (manager *SBOMetricsManager) updateNextCloseCheck(fm *fileMetrics, tw *openTimeWindow) {
+	closeAt := manager.closeTimeFor(tw)
+	if fm.nextCloseCheck.IsZero() || closeAt.Before(fm.nextCloseCheck) {
+		fm.nextCloseCheck = closeAt
+	}
 }
 
 /*
 AddMetric adds valueToAdd to the metric value for the given time window.
-OpenTimeWindow must have been called, and must have returned true, for the time window before calling this method.
+The time window must have been returned by OpenTimeWindow, with a status other than TIME_WINDOW_REJECTED, for the current log entry.
 */
 func (manager *SBOMetricsManager) AddMetric(filePath string, metricType int, keyValue string, timeWindow int64, valueToAdd int64) {
-	mapForFile, ok := manager.allMetrics[filePath]
-	if !ok {
-		mapForFile = make(SBOMetricMap)
-		manager.allMetrics[filePath] = mapForFile
+	fm := manager.fileMetricsFor(filePath)
+	tw := fm.openTimeWindows[timeWindow]
+	if tw == nil {
+		slog.Debug("AddMetric called for a time window that is not open, OpenTimeWindow must be called first", "filePath", filePath, "timeWindow", timeWindow)
+		return
 	}
-	keyMap, ok := mapForFile[metricType]
-	if !ok {
-		keyMap = make(map[string]*SBOMetric)
-		mapForFile[metricType] = keyMap
+	keys := tw.values[metricType]
+	if keys == nil {
+		keys = make(map[string]*SBOMetricValue)
+		tw.values[metricType] = keys
 	}
-	sbom, ok := keyMap[keyValue]
-	if !ok {
-		sbom = NewSBOMetric()
-		keyMap[keyValue] = sbom
+	value := keys[keyValue]
+	if value == nil {
+		if manager.maxKeysPerWindow > 0 && len(keyValue) > 0 && keyValue != SBO_METRIC_KEY_OTHER {
+			if tw.keyCounts == nil {
+				tw.keyCounts = make(map[int]int)
+			}
+			if tw.keyCounts[metricType] >= manager.maxKeysPerWindow {
+				keyValue = SBO_METRIC_KEY_OTHER
+				value = keys[keyValue]
+			} else {
+				tw.keyCounts[metricType]++
+			}
+		}
+		if value == nil {
+			value = &SBOMetricValue{}
+			keys[keyValue] = value
+		}
 	}
-	sbom.Values[timeWindow] += valueToAdd
+	value.Value += valueToAdd
+	value.unsaved += valueToAdd
+	if !value.dirty {
+		value.dirty = true
+		tw.dirty = append(tw.dirty, dirtyMetricValue{metricType: metricType, keyValue: keyValue, value: value})
+	}
 }
 
 /*
-FlushAll closes all open time windows for the file and returns all remaining metric values, e.g when processing ends.
+Returns values that changed since they were last returned (for all open time windows) and values of time windows that were closed.
+Flagged time windows (late entries, unconfirmed jumps) are closed. Call periodically to save metrics before time windows are closed.
 */
-func (manager *SBOMetricsManager) FlushAll(filePath string) []*SBOMetricWindowDataToBeSaved {
-	var rv []*SBOMetricWindowDataToBeSaved
-	open := manager.openTimeWindows[filePath]
-	for _, tw := range open {
-		rv = append(rv, manager.removeTimeWindow(filePath, tw)...)
+func (manager *SBOMetricsManager) CollectDataToBeSaved(filePath string) []*SBOMetricWindowDataToBeSaved {
+	fm := manager.files[filePath]
+	if fm == nil {
+		return nil
 	}
-	if len(open) > 0 {
-		manager.lastClosedTimeWindow[filePath] = open[len(open)-1]
+	rv := manager.closeDueTimeWindows(filePath, fm, true)
+	for _, tw := range fm.openTimeWindows {
+		rv = manager.appendDirtyValues(rv, filePath, tw)
 	}
-	manager.openTimeWindows[filePath] = nil
 	return rv
 }
 
-// removes values for the time window from all metrics of the file and returns them. Keys left without values are removed
-func (manager *SBOMetricsManager) removeTimeWindow(filePath string, timeWindow int64) []*SBOMetricWindowDataToBeSaved {
+/*
+FlushAll closes all open time windows for the file and returns all values that were not returned before, e.g when processing ends.
+*/
+func (manager *SBOMetricsManager) FlushAll(filePath string) []*SBOMetricWindowDataToBeSaved {
+	fm := manager.files[filePath]
+	if fm == nil {
+		return nil
+	}
 	var rv []*SBOMetricWindowDataToBeSaved
-	for metricType, keyMap := range manager.allMetrics[filePath] {
-		for keyValue, sbom := range keyMap {
-			metricValue, ok := sbom.Values[timeWindow]
-			if !ok {
-				continue
-			}
-			rv = append(rv, NewSBOMetricWindowDataToBeSaved(filePath, metricType, keyValue, timeWindow, metricValue))
-			delete(sbom.Values, timeWindow)
-			if len(sbom.Values) == 0 {
-				delete(keyMap, keyValue)
-			}
+	for _, tw := range fm.openTimeWindows {
+		rv = append(rv, manager.closeTimeWindow(filePath, fm, tw)...)
+	}
+	fm.nextCloseCheck = time.Time{}
+	return rv
+}
+
+// closes time windows that are due according to the watermark, and all flagged time windows if includeFlagged is true
+func (manager *SBOMetricsManager) closeDueTimeWindows(filePath string, fm *fileMetrics, includeFlagged bool) []*SBOMetricWindowDataToBeSaved {
+	var rv []*SBOMetricWindowDataToBeSaved
+	fm.nextCloseCheck = time.Time{}
+	for _, tw := range fm.openTimeWindows {
+		if !manager.closeTimeFor(tw).After(fm.watermark) || (includeFlagged && manager.isFlagged(tw)) {
+			rv = append(rv, manager.closeTimeWindow(filePath, fm, tw)...)
+		} else {
+			manager.updateNextCloseCheck(fm, tw)
 		}
 	}
+	//forget closed time windows that are too old to matter, see OpenTimeWindow
+	for timeWindow, end := range fm.closedTimeWindows {
+		if !end.Add(2 * manager.allowedLateness).After(fm.watermark) {
+			delete(fm.closedTimeWindows, timeWindow)
+		}
+	}
+	return rv
+}
+
+// called when there are too many open time windows: closes outliers first, then late entries, then the oldest. Never closes keepTimeWindow
+func (manager *SBOMetricsManager) closeExcessTimeWindows(filePath string, fm *fileMetrics, keepTimeWindow int64) []*SBOMetricWindowDataToBeSaved {
+	var rv []*SBOMetricWindowDataToBeSaved
+	for len(fm.openTimeWindows) > manager.maxOpenTimeWindows {
+		var victim *openTimeWindow
+		victimRank := 3
+		for _, tw := range fm.openTimeWindows {
+			if tw.timeWindow == keepTimeWindow {
+				continue
+			}
+			rank := 2
+			if tw.outlier {
+				rank = 0
+			} else if tw.reopened {
+				rank = 1
+			}
+			if victim == nil || rank < victimRank || (rank == victimRank && tw.timeWindow < victim.timeWindow) {
+				victim = tw
+				victimRank = rank
+			}
+		}
+		if victim == nil {
+			break
+		}
+		slog.Debug("Too many open time windows, closing one", "filePath", filePath, "timeWindow", victim.timeWindow, "rank", victimRank)
+		rv = append(rv, manager.closeTimeWindow(filePath, fm, victim)...)
+	}
+	fm.nextCloseCheck = time.Time{}
+	for _, tw := range fm.openTimeWindows {
+		manager.updateNextCloseCheck(fm, tw)
+	}
+	return rv
+}
+
+// removes the time window and returns its values that were not returned before
+func (manager *SBOMetricsManager) closeTimeWindow(filePath string, fm *fileMetrics, tw *openTimeWindow) []*SBOMetricWindowDataToBeSaved {
+	rv := manager.appendDirtyValues(nil, filePath, tw)
+	delete(fm.openTimeWindows, tw.timeWindow)
+	fm.closedTimeWindows[tw.timeWindow] = tw.end
+	return rv
+}
+
+// appends values that changed since they were last returned, in the order they changed, and marks them as returned
+func (manager *SBOMetricsManager) appendDirtyValues(rv []*SBOMetricWindowDataToBeSaved, filePath string, tw *openTimeWindow) []*SBOMetricWindowDataToBeSaved {
+	for _, d := range tw.dirty {
+		valueToSave := d.value.unsaved
+		if manager.replaceExistingMetrics {
+			valueToSave = d.value.Value
+		}
+		d.value.unsaved = 0
+		d.value.dirty = false
+		rv = append(rv, NewSBOMetricWindowDataToBeSaved(filePath, d.metricType, d.keyValue, tw.timeWindow, valueToSave))
+	}
+	tw.dirty = tw.dirty[:0]
 	return rv
 }

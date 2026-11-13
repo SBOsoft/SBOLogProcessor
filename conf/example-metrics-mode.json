@@ -21,7 +21,10 @@
         "SaveLogsToDbMaskIPs": true,
         "SaveLogsToDbOnlyRelevant": 1,
         "SaveReadPosition": true,
-        "ReadPositionDirectory": "."
+        "ReadPositionDirectory": ".",
+        "MetricsWindowSize": 3,
+        "MetricsFlushIntervalSeconds": 30,
+        "MetricsMaxKeysPerWindow": 10000
     },
     "/var/log/apache2/access.log": {
         "Enabled": true,

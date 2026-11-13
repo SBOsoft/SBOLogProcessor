@@ -20,11 +20,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -35,28 +35,33 @@ import (
 const (
 	METRIC_GENERATOR_HANDLER_NAME       string = "METRICS"
 	METRIC_GENERATOR_LAST_N_WINDOW_SIZE        = 50
+	//minimum interval between log messages about log entries for closed time windows
+	LATE_ENTRIES_REPORT_INTERVAL time.Duration = 5 * time.Minute
 )
 
 var nonNumericRegex = regexp.MustCompile(`[^0-9]+`)
 
 type MetricGeneratorHandler struct {
-	filePath              string
-	lastNEntries          []*logparsers.SBOHttpRequestLog
-	lastNPosition         int
-	handledEntryCounter   int
-	dataToBeSavedChannel  chan *metrics.SBOMetricWindowDataToBeSaved
-	metricsManager        *metrics.SBOMetricsManager
-	timeWindowSizeMinutes int
+	filePath             string
+	lastNEntries         []*logparsers.SBOHttpRequestLog
+	lastNPosition        int
+	handledEntryCounter  int
+	dataToBeSavedChannel metrics.DataToBeSavedChannel
+	metricsManager       *metrics.SBOMetricsManager
+	//log entries for already closed time windows since the last report, see reportLateEntries
+	lateEntryCount     int
+	rejectedEntryCount int
+	lastLateEntryCheck time.Time
 }
 
-func NewMetricGeneratorHandler(filePath string, metricsManager *metrics.SBOMetricsManager, twSizeInMinutes int) *MetricGeneratorHandler {
+func NewMetricGeneratorHandler(filePath string, metricsManager *metrics.SBOMetricsManager) *MetricGeneratorHandler {
 	lastN := make([]*logparsers.SBOHttpRequestLog, METRIC_GENERATOR_LAST_N_WINDOW_SIZE)
 	var rv = MetricGeneratorHandler{
-		filePath:              filePath,
-		lastNEntries:          lastN,
-		lastNPosition:         0,
-		metricsManager:        metricsManager,
-		timeWindowSizeMinutes: twSizeInMinutes}
+		filePath:           filePath,
+		lastNEntries:       lastN,
+		lastNPosition:      0,
+		metricsManager:     metricsManager,
+		lastLateEntryCheck: time.Now()}
 
 	return &rv
 }
@@ -65,7 +70,7 @@ func (handler *MetricGeneratorHandler) Name() string {
 	return METRIC_GENERATOR_HANDLER_NAME
 }
 
-func (handler *MetricGeneratorHandler) Begin(dataToSaveChan chan *metrics.SBOMetricWindowDataToBeSaved) error {
+func (handler *MetricGeneratorHandler) Begin(dataToSaveChan metrics.DataToBeSavedChannel) error {
 	handler.dataToBeSavedChannel = dataToSaveChan
 	return nil
 }
@@ -82,17 +87,21 @@ func (handler *MetricGeneratorHandler) PrintMetrics(filePath string) {
 	fmt.Print(str)
 }
 
-// TODO decide how we will save generated metrics
 func (handler *MetricGeneratorHandler) HandleEntry(parsedLogEntry *logparsers.SBOHttpRequestLog) (bool, error) {
 	handler.handledEntryCounter++
-	timeWindow := handler.calculateTimeWindow(parsedLogEntry.Timestamp)
-	//opening a new time window may close the oldest one, values for the closed time window must be saved
-	accepted, closedData := handler.metricsManager.OpenTimeWindow(handler.filePath, timeWindow)
+	//a newer timestamp may close older time windows, their values must be saved
+	timeWindow, status, closedData := handler.metricsManager.OpenTimeWindow(handler.filePath, parsedLogEntry.Timestamp)
 	handler.sendDataToBeSaved(closedData)
-	if !accepted {
-		//metrics for this time window were already saved, see MetricsWindowSize config option
-		slog.Debug("Ignoring log entry for metrics, its time window is already closed", "timestamp", parsedLogEntry.Timestamp, "timeWindow", timeWindow)
+	switch status {
+	case metrics.TIME_WINDOW_REJECTED:
+		//metrics for this time window were already saved and would be replaced, see ReplaceExistingMetrics and MetricsWindowSize config options
+		handler.rejectedEntryCount++
+		handler.reportLateEntries(false)
 		return false, nil
+	case metrics.TIME_WINDOW_REOPENED:
+		//metrics for this time window were already saved, values for this entry will be added to the saved values
+		handler.lateEntryCount++
+		handler.reportLateEntries(false)
 	}
 
 	handler.handleSingleMetric(timeWindow, metrics.SBO_METRIC_REQ_COUNT, "", 1)
@@ -132,52 +141,53 @@ func (handler *MetricGeneratorHandler) HandleEntry(parsedLogEntry *logparsers.SB
 	return true, nil
 }
 
-/*
-calculate time window
-*/
-func (handler *MetricGeneratorHandler) calculateTimeWindow(eventTimestamp time.Time) int64 {
-	cleanTsUpToMinutes := eventTimestamp.Format("2006010215")
-
-	minutes := eventTimestamp.Minute()
-	minutePart := ""
-
-	switch handler.timeWindowSizeMinutes {
-	case 1:
-		minutePart = fmt.Sprintf("%02d", minutes)
-	case 5:
-		//must end with 0 or 5
-		minutePart = fmt.Sprintf("%02d", minutes-(minutes%5))
-	case 15:
-		//must end with one of 00 15 30 45
-		minutePart = fmt.Sprintf("%02d", minutes-(minutes%15))
-	case 30:
-		//must end with 00 or 30
-		minutePart = fmt.Sprintf("%02d", minutes-(minutes%30))
-	case 60:
-		//must end with 00
-		minutePart = "00"
-	default: //default is 10. time window  must end with one of 00, 10, 20, 30, 40, 50
-		minutePart = fmt.Sprintf("%02d", minutes-(minutes%10))
-	}
-
-	twInt64, _ := strconv.ParseInt(cleanTsUpToMinutes+minutePart, 10, 64)
-	return twInt64
-}
-
 func (handler *MetricGeneratorHandler) handleSingleMetric(timeWindow int64, metricType int, keyValue string, valueToAdd int64) {
 	handler.metricsManager.AddMetric(handler.filePath, metricType, keyValue, timeWindow, valueToAdd)
 }
 
+// sends the data as a single batch
 func (handler *MetricGeneratorHandler) sendDataToBeSaved(data []*metrics.SBOMetricWindowDataToBeSaved) {
-	for _, dataToBeSaved := range data {
-		slog.Debug("Data to be saved", "data", dataToBeSaved)
-		handler.dataToBeSavedChannel <- dataToBeSaved
+	if len(data) < 1 {
+		return
 	}
+	if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+		for _, dataToBeSaved := range data {
+			slog.Debug("Data to be saved", "data", dataToBeSaved)
+		}
+	}
+	handler.dataToBeSavedChannel <- data
+}
+
+/*
+Called periodically, see MetricsFlushIntervalSeconds config option. Saves values that changed since the last flush,
+so that metrics for the current time windows are available without waiting for the time windows to be closed
+*/
+func (handler *MetricGeneratorHandler) Flush() {
+	handler.sendDataToBeSaved(handler.metricsManager.CollectDataToBeSaved(handler.filePath))
+	handler.reportLateEntries(false)
+}
+
+// log entries for closed time windows are logged at most once every LATE_ENTRIES_REPORT_INTERVAL, unless force is true
+func (handler *MetricGeneratorHandler) reportLateEntries(force bool) {
+	if !force && time.Since(handler.lastLateEntryCheck) < LATE_ENTRIES_REPORT_INTERVAL {
+		return
+	}
+	if handler.lateEntryCount > 0 || handler.rejectedEntryCount > 0 {
+		slog.Info("Received log entries for time windows that were already closed and saved",
+			"filePath", handler.filePath,
+			"addedToSavedMetrics", handler.lateEntryCount,
+			"ignoredForMetrics", handler.rejectedEntryCount,
+			"since", handler.lastLateEntryCheck.Format(time.RFC3339))
+	}
+	handler.lateEntryCount = 0
+	handler.rejectedEntryCount = 0
+	handler.lastLateEntryCheck = time.Now()
 }
 
 func (handler *MetricGeneratorHandler) End() bool {
 	handler.PrintMetrics(handler.filePath)
 	//save values for all time windows that are still open
 	handler.sendDataToBeSaved(handler.metricsManager.FlushAll(handler.filePath))
+	handler.reportLateEntries(true)
 	return true
 }

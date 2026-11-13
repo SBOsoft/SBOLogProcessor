@@ -50,6 +50,9 @@ const (
 	COUNTER_TOPN_SIZE_DEFAULT       int    = 10
 	COUNTER_OUTPUT_INTERVAL_DEFAULT int    = 30
 
+	METRICS_FLUSH_INTERVAL_SECONDS_DEFAULT int = 30
+	METRICS_MAX_KEYS_PER_WINDOW_DEFAULT    int = 10000
+
 	SBO_LOGP_LOG_FILE string = "./sbologp-logs.log"
 )
 
@@ -139,7 +142,18 @@ Adjust configuration values that would lead to incorrect metrics. Call after log
 func validateAndAdjustConfig() {
 	filesPerDomain := make(map[string]int)
 	for filePath, config := range globalConfig {
-		if filePath == DEFAULT_CONFIG_KEY || filePath == OSMETRICS_CONFIG_KEY || !config.WriteMetricsToDb {
+		if filePath == DEFAULT_CONFIG_KEY || filePath == OSMETRICS_CONFIG_KEY {
+			continue
+		}
+		if !metrics.IsSupportedTimeWindowSizeMinutes(config.TimeWindowSizeMinutes) {
+			//0 means not configured
+			if config.TimeWindowSizeMinutes != 0 {
+				slog.Warn("Unsupported TimeWindowSizeMinutes value, using the default value. Supported values are 1, 5, 10, 15, 30, 60",
+					"filePath", filePath, "TimeWindowSizeMinutes", config.TimeWindowSizeMinutes, "default", metrics.TIME_WINDOW_SIZE_MINUTES_DEFAULT)
+			}
+			config.TimeWindowSizeMinutes = metrics.TIME_WINDOW_SIZE_MINUTES_DEFAULT
+		}
+		if !config.WriteMetricsToDb {
 			continue
 		}
 		filesPerDomain[config.DomainName]++
@@ -403,6 +417,8 @@ func parseCommandArgs() {
 				DbDatabase:                   "",
 				ReplaceExistingMetrics:       true,
 				MetricsWindowSize:            3,
+				MetricsFlushIntervalSeconds:  METRICS_FLUSH_INTERVAL_SECONDS_DEFAULT,
+				MetricsMaxKeysPerWindow:      METRICS_MAX_KEYS_PER_WINDOW_DEFAULT,
 				CounterTopNForKeyedMetrics:   *counterTopNPtr,
 				CounterOutputIntervalSeconds: *counterOutputIntervalPtr}
 
@@ -522,6 +538,16 @@ func loadConfigFromFile(configFileName string) bool {
 			//on by default
 			mapSaveReadPosition = true
 		}
+		mapMetricsFlushIntervalSeconds, ok := conf["MetricsFlushIntervalSeconds"].(float64)
+		conf["MetricsFlushIntervalSeconds_ok"] = ok
+		if !ok || mapMetricsFlushIntervalSeconds < 0 {
+			mapMetricsFlushIntervalSeconds = float64(METRICS_FLUSH_INTERVAL_SECONDS_DEFAULT)
+		}
+		mapMetricsMaxKeysPerWindow, ok := conf["MetricsMaxKeysPerWindow"].(float64)
+		conf["MetricsMaxKeysPerWindow_ok"] = ok
+		if !ok || mapMetricsMaxKeysPerWindow < 0 {
+			mapMetricsMaxKeysPerWindow = float64(METRICS_MAX_KEYS_PER_WINDOW_DEFAULT)
+		}
 		mapReadPositionDirectory, ok := conf["ReadPositionDirectory"].(string)
 		conf["ReadPositionDirectory_ok"] = ok
 
@@ -556,7 +582,9 @@ func loadConfigFromFile(configFileName string) bool {
 			OSMetricsEnabled:             mapOSMetricsEnabled,
 			OSMetricsIntervalMinutes:     int(mapOSMetricsIntervalMinutes),
 			SaveReadPosition:             mapSaveReadPosition,
-			ReadPositionDirectory:        mapReadPositionDirectory}
+			ReadPositionDirectory:        mapReadPositionDirectory,
+			MetricsFlushIntervalSeconds:  int(mapMetricsFlushIntervalSeconds),
+			MetricsMaxKeysPerWindow:      int(mapMetricsMaxKeysPerWindow)}
 
 	}
 	_, configContainsDefaultEntry := globalConfig[DEFAULT_CONFIG_KEY]
@@ -639,6 +667,12 @@ func loadConfigFromFile(configFileName string) bool {
 			if !configLoadedFromFile[filePath]["ReadPositionDirectory_ok"].(bool) {
 				globalConfig[filePath].ReadPositionDirectory = globalConfig[DEFAULT_CONFIG_KEY].ReadPositionDirectory
 			}
+			if !configLoadedFromFile[filePath]["MetricsFlushIntervalSeconds_ok"].(bool) {
+				globalConfig[filePath].MetricsFlushIntervalSeconds = globalConfig[DEFAULT_CONFIG_KEY].MetricsFlushIntervalSeconds
+			}
+			if !configLoadedFromFile[filePath]["MetricsMaxKeysPerWindow_ok"].(bool) {
+				globalConfig[filePath].MetricsMaxKeysPerWindow = globalConfig[DEFAULT_CONFIG_KEY].MetricsMaxKeysPerWindow
+			}
 		}
 
 		_, ok := globalConfig[OSMETRICS_CONFIG_KEY]
@@ -665,7 +699,7 @@ func loadConfigFromFile(configFileName string) bool {
 	return true
 }
 
-func createHandler(filePath string, handlerName string, dataToSaveChan chan *metrics.SBOMetricWindowDataToBeSaved, metricsManager *metrics.SBOMetricsManager) SBOLogHandlerInterface {
+func createHandler(filePath string, handlerName string, dataToSaveChan metrics.DataToBeSavedChannel, metricsManager *metrics.SBOMetricsManager) SBOLogHandlerInterface {
 	config := getConfigForFile(filePath)
 	switch {
 	case handlerName == handlers.WRITE_TO_FILE_HANDLER_NAME:
@@ -674,7 +708,7 @@ func createHandler(filePath string, handlerName string, dataToSaveChan chan *met
 		slog.Info("Created WriteToFileHandler", "error", err)
 		return writeToFile
 	case handlerName == handlers.METRIC_GENERATOR_HANDLER_NAME:
-		metricsGenerator := handlers.NewMetricGeneratorHandler(filePath, metricsManager, config.TimeWindowSizeMinutes)
+		metricsGenerator := handlers.NewMetricGeneratorHandler(filePath, metricsManager)
 		metricsGenerator.Begin(dataToSaveChan)
 		slog.Info("Created MetricGeneratorHandler")
 		return metricsGenerator
@@ -697,7 +731,7 @@ func processFile(filePath string, parentWaitGroup *sync.WaitGroup) {
 
 	config := getConfigForFile(filePath)
 	lines := make(chan logLineToProcess, 10) // Buffered channel to prevent blocking
-	dataToBeSavedChannel := make(chan *metrics.SBOMetricWindowDataToBeSaved, 100)
+	dataToBeSavedChannel := make(metrics.DataToBeSavedChannel, 100)
 	readPositions := newReadPositionTracker(filePath, config)
 
 	sbodb := db.NewSBOAnalyticsDB()
@@ -749,7 +783,7 @@ func configureLogging(logLevel slog.Level) *os.File {
 /*
 Save metric data
 */
-func processMetricDataToBeSaved(filePath string, dataToBeSavedChannel chan *metrics.SBOMetricWindowDataToBeSaved, wg *sync.WaitGroup, sbodb *db.SBOAnalyticsDB) {
+func processMetricDataToBeSaved(filePath string, dataToBeSavedChannel metrics.DataToBeSavedChannel, wg *sync.WaitGroup, sbodb *db.SBOAnalyticsDB) {
 
 	defer wg.Done()
 	config := getConfigForFile(filePath)
@@ -758,32 +792,60 @@ func processMetricDataToBeSaved(filePath string, dataToBeSavedChannel chan *metr
 			//nothing to do here, just move
 			continue
 		}
-		domainName := config.DomainName
-		if len(dataToSave.DomainName) > 0 {
-			domainName = dataToSave.DomainName
-		}
-
-		domainId, _ := sbodb.GetDomainId(domainName, config.TimeWindowSizeMinutes)
-		/*
-			if domainId < 1 {
-				slog.Warn("domainId < 1 for data", "data", dataToSave)
+		//collect whatever else is already waiting in the channel and save it using multi-row inserts.
+		// Order is preserved, which matters when ReplaceExistingMetrics is true
+		batch := dataToSave
+	collectBatch:
+		for len(batch) < db.SAVE_METRIC_DATA_BATCH_SIZE {
+			select {
+			case moreData, ok := <-dataToBeSavedChannel:
+				if !ok {
+					//channel closed, the outer loop will end after saving this batch
+					break collectBatch
+				}
+				batch = append(batch, moreData...)
+			default:
+				break collectBatch
 			}
-		*/
-		sbodb.SaveMetricData(dataToSave, domainId, config.ReplaceExistingMetrics)
-		slog.Debug("processMetricDataToBeSaved save data:", "dataToSave", dataToSave)
+		}
+		saveMetricDataBatch(config, batch, sbodb)
 	}
 
 	slog.Debug("processMetricDataToBeSaved done")
 }
 
-func consumeLinesFromChannel(filePath string, linesChannel <-chan logLineToProcess, wg *sync.WaitGroup, dataToBeSavedChannel chan *metrics.SBOMetricWindowDataToBeSaved, sbodb *db.SBOAnalyticsDB,
+func saveMetricDataBatch(config *ConfigForAMonitoredFile, batch []*metrics.SBOMetricWindowDataToBeSaved, sbodb *db.SBOAnalyticsDB) {
+	//data from a file is normally for a single domain, group by domain name anyway
+	dataPerDomain := make(map[string][]*metrics.SBOMetricWindowDataToBeSaved)
+	var domainNames []string
+	for _, dataToSave := range batch {
+		domainName := config.DomainName
+		if len(dataToSave.DomainName) > 0 {
+			domainName = dataToSave.DomainName
+		}
+		if _, ok := dataPerDomain[domainName]; !ok {
+			domainNames = append(domainNames, domainName)
+		}
+		dataPerDomain[domainName] = append(dataPerDomain[domainName], dataToSave)
+	}
+	for _, domainName := range domainNames {
+		domainId, _ := sbodb.GetDomainId(domainName, config.TimeWindowSizeMinutes)
+		sbodb.SaveMetricDataBatch(dataPerDomain[domainName], domainId, config.ReplaceExistingMetrics)
+		slog.Debug("processMetricDataToBeSaved saved data", "domainName", domainName, "rowCount", len(dataPerDomain[domainName]))
+	}
+}
+
+func consumeLinesFromChannel(filePath string, linesChannel <-chan logLineToProcess, wg *sync.WaitGroup, dataToBeSavedChannel metrics.DataToBeSavedChannel, sbodb *db.SBOAnalyticsDB,
 	readPositions *readPositionTracker) {
 	var processedLineCount, errorCount int
 	var parserFunction func(string) (*logparsers.SBOHttpRequestLog, error) = nil
 	var lineResult bool
 	config := getConfigForFile(filePath)
-	//*metrics.SBOMetricsManager
-	metricsManager := metrics.NewSBOMetricsManager(config.MetricsWindowSize)
+	metricsManager := metrics.NewSBOMetricsManager(metrics.SBOMetricsManagerOptions{
+		MetricsWindowSize:      config.MetricsWindowSize,
+		TimeWindowSizeMinutes:  config.TimeWindowSizeMinutes,
+		ReplaceExistingMetrics: config.ReplaceExistingMetrics,
+		MaxKeysPerWindow:       config.MetricsMaxKeysPerWindow})
 
 	for _, handlerName := range config.Handlers {
 		config.HandlerInstances[handlerName] = createHandler(filePath, handlerName, dataToBeSavedChannel, metricsManager)
@@ -795,6 +857,13 @@ func consumeLinesFromChannel(filePath string, linesChannel <-chan logLineToProce
 	slog.Debug("Start consumer in consumeLinesFromChannel", "filePath", filePath)
 	saveReadPositionTicker := time.NewTicker(READ_POSITION_SAVE_INTERVAL)
 	defer saveReadPositionTicker.Stop()
+	//nil channel (never fires) when periodic flushing is disabled
+	var flushMetricsTickerChannel <-chan time.Time
+	if config.MetricsFlushIntervalSeconds > 0 {
+		flushMetricsTicker := time.NewTicker(time.Duration(config.MetricsFlushIntervalSeconds) * time.Second)
+		defer flushMetricsTicker.Stop()
+		flushMetricsTickerChannel = flushMetricsTicker.C
+	}
 consumeLoop:
 	for {
 		select {
@@ -811,6 +880,12 @@ consumeLoop:
 			readPositions.update(item)
 		case <-saveReadPositionTicker.C:
 			readPositions.saveIfChanged()
+		case <-flushMetricsTickerChannel:
+			for _, h := range config.HandlerInstances {
+				if flusher, ok := h.(SBOLogHandlerFlusher); ok {
+					flusher.Flush()
+				}
+			}
 		}
 	}
 
@@ -824,7 +899,7 @@ consumeLoop:
 
 func processSingleLogLine(filePath string, logLine string,
 	parserFunction func(string) (*logparsers.SBOHttpRequestLog, error),
-	dataToBeSavedChannel chan *metrics.SBOMetricWindowDataToBeSaved,
+	dataToBeSavedChannel metrics.DataToBeSavedChannel,
 	sbodb *db.SBOAnalyticsDB) (bool, func(string) (*logparsers.SBOHttpRequestLog, error)) {
 	if len(logLine) < 1 {
 		return false, parserFunction
@@ -897,7 +972,7 @@ func processSingleLogLine(filePath string, logLine string,
 	return false, parserFunction
 }
 
-func callHandlersForRequestLogEntry(filePath string, parsedLogEntry *logparsers.SBOHttpRequestLog, dataToBeSavedChannel chan *metrics.SBOMetricWindowDataToBeSaved) {
+func callHandlersForRequestLogEntry(filePath string, parsedLogEntry *logparsers.SBOHttpRequestLog, dataToBeSavedChannel metrics.DataToBeSavedChannel) {
 	//processMetricsForRequestLogEntry(filePath, parsedLogEntry)
 	config := getConfigForFile(filePath)
 	for _, h := range config.HandlerInstances {
@@ -1191,12 +1266,17 @@ type ConfigForAMonitoredFile struct {
 	// when false then if a metric entry already exists then the value will be added to the existing value
 	// Forced to false when SaveReadPosition is true or when multiple files are configured with the same DomainName
 	ReplaceExistingMetrics bool
-	//Only a limited number of most recent time window values will be kept active and others will be removed out of scope (and saved)
-	// e.g if we encounter logs for 202507021121 and 202507021122 and 202507021123 then we should be able to handle them
-	// e.g if they are somehow unordered, e.g a request takes too long to complete and is logged after subsequent requests
-	// or when timewindow goes out of scope when new time window values are encountered
-	// this assumes/requires that the logs are in chronological order
+	//Time windows are kept open in memory for max((MetricsWindowSize-1)*TimeWindowSizeMinutes, 10) minutes after they end, based on log timestamps
+	// (never the current clock), e.g to handle requests that take long to complete and are logged after subsequent requests.
+	// Then they are closed and their remaining values are saved.
+	// Log entries arriving after their time window was closed are added to saved metrics, or ignored for metrics when ReplaceExistingMetrics is true
 	MetricsWindowSize int
+	//metric values that changed are saved every MetricsFlushIntervalSeconds, so that metrics for current time windows are available
+	// before the time windows are closed. 0 disables periodic saving, metrics are then saved only when time windows are closed. Defaults to 30
+	MetricsFlushIntervalSeconds int
+	//when > 0, for each metric type and time window at most this many distinct keys (e.g referers) are kept,
+	// additional keys are counted under the key "--other--". 0 means no limit. Defaults to 10000
+	MetricsMaxKeysPerWindow int
 	//number of top N items like IP addresses to be displayed in outputs for counter mode (when -p=count option is provided)
 	CounterTopNForKeyedMetrics int
 	//when following, interval for updating stats/output for counter mode (when -p=count option is provided)
@@ -1240,4 +1320,10 @@ type SBOLogHandlerInterface interface {
 	//Begin(someVar any) error
 	HandleEntry(*logparsers.SBOHttpRequestLog) (bool, error)
 	End() bool
+}
+
+// optionally implemented by handlers that need to save data periodically, see MetricsFlushIntervalSeconds.
+// Called from the same goroutine as HandleEntry
+type SBOLogHandlerFlusher interface {
+	Flush()
 }
