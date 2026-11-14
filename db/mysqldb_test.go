@@ -98,3 +98,11 @@ func TestFormatRequestTimestamp(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadAverageValue(t *testing.T) {
+	for input, expected := range map[string]float64{"0.08": 0.08, "1.50": 1.5, "": 0, "x": 0} {
+		if got := loadAverageValue(input); got != expected {
+			t.Errorf("loadAverageValue(%q) = %v, expected %v", input, got, expected)
+		}
+	}
+}

@@ -172,3 +172,128 @@ Swap:              0           0           0`
 	}
 
 }
+
+func TestParseFreeOutputWithSwap(t *testing.T) {
+
+	freeOutput := `               total        used        free      shared  buff/cache   available
+Mem:         8131912     1142280     5147464        4044     2163520     6989632
+Swap:        2097148      524288     1572860`
+	memInfo, err := ParseFreeOutput(freeOutput)
+	if err != nil {
+		t.Error("Unexpected error", err)
+		return
+	}
+
+	if memInfo.SwapUse != 524288 {
+		t.Error("Unexpected SwapUse value", memInfo.SwapUse)
+	}
+	if memInfo.MemUse != 1142280 {
+		t.Error("Unexpected MemUse value", memInfo.MemUse)
+	}
+}
+
+func TestParseUptimeOutputDurations(t *testing.T) {
+	tests := []struct {
+		uptime          string
+		expectedMinutes int
+		expectedUsers   int
+		expectedLoad1   string
+	}{
+		{" 14:35:01 up 5 min,  2 users,  load average: 0.08, 0.03, 0.00", 5, 2, "0.08"},
+		{" 14:35:01 up 3 days,  5 min,  2 users,  load average: 0.08, 0.03, 0.00", 3*24*60 + 5, 2, "0.08"},
+		{" 14:35:01 up 1 day,  2:03,  1 user,  load average: 0.08, 0.03, 0.00", 24*60 + 2*60 + 3, 1, "0.08"},
+		{" 14:35:01 up 0 min,  0 users,  load average: 0.08, 0.03, 0.00", 0, 0, "0.08"},
+		// no user count (e.g. BusyBox without utmp)
+		{" 14:35:01 up 3 days,  2:03,  load average: 0.08, 0.03, 0.00", 3*24*60 + 2*60 + 3, 0, "0.08"},
+		{" 14:35:01 up 5 min,  load average: 0.08, 0.03, 0.00", 5, 0, "0.08"},
+		// decimal comma (non-C locale)
+		{" 14:35:01 up 3 days,  2:03,  2 users,  load average: 0,08, 0,03, 0,00", 3*24*60 + 2*60 + 3, 2, "0.08"},
+		// macOS
+		{"14:35  up 3 days, 4 hrs, 2 users, load averages: 1.20 1.10 1.00", 3*24*60 + 4*60, 2, "1.20"},
+		{"14:35  up 3 days, 12 mins, 2 users, load averages: 1.20 1.10 1.00", 3*24*60 + 12, 2, "1.20"},
+		{"14:35  up 1 min, 1 user, load averages: 1.20 1.10 1.00", 1, 1, "1.20"},
+		{"14:35  up 30 secs, 1 user, load averages: 1.20 1.10 1.00", 0, 1, "1.20"},
+		{"9:05  up 2:03, 1 user, load averages: 1.20 1.10 1.00", 2*60 + 3, 1, "1.20"},
+	}
+	for _, test := range tests {
+		info := ParseUptimeOutput(test.uptime)
+		if info.UpDurationMinutes != test.expectedMinutes || info.Users != test.expectedUsers || info.LoadAverage1 != test.expectedLoad1 {
+			t.Errorf("%q: got minutes=%d users=%d load1=%q, expected %d %d %q", test.uptime,
+				info.UpDurationMinutes, info.Users, info.LoadAverage1, test.expectedMinutes, test.expectedUsers, test.expectedLoad1)
+		}
+	}
+}
+
+func TestParseProcUptimeAndLoadAvg(t *testing.T) {
+	minutes, err := ParseProcUptime("299381.17 1176533.49\n")
+	if err != nil || minutes != 4989 {
+		t.Error("Unexpected /proc/uptime result", minutes, err)
+	}
+	if _, err := ParseProcUptime(""); err == nil {
+		t.Error("Expected error for empty /proc/uptime")
+	}
+
+	la1, la5, la15, err := ParseProcLoadAvg("0.08 0.03 0.00 1/123 4567\n")
+	if err != nil || la1 != "0.08" || la5 != "0.03" || la15 != "0.00" {
+		t.Error("Unexpected /proc/loadavg result", la1, la5, la15, err)
+	}
+	if _, _, _, err := ParseProcLoadAvg("0.08 x 0.00"); err == nil {
+		t.Error("Expected error for invalid /proc/loadavg")
+	}
+}
+
+func TestParseProcMeminfo(t *testing.T) {
+	meminfo := `MemTotal:        8131912 kB
+MemFree:         5147464 kB
+MemAvailable:    6989632 kB
+Buffers:          163520 kB
+Cached:          1800000 kB
+SwapCached:            0 kB
+Active:          1000000 kB
+SReclaimable:     200000 kB
+SwapTotal:       2097148 kB
+SwapFree:        1572860 kB
+HugePages_Total:       0
+`
+	info, err := ParseProcMeminfo(meminfo)
+	if err != nil {
+		t.Fatal("Unexpected error", err)
+	}
+	// same values as `free` reports for this host, see TestParseFreeOutputUbuntu
+	expected := MemoryInfo{SwapUse: 524288, CachUse: 2163520, MemUse: 1142280, MemFree: 5147464, MemAvailable: 6989632}
+	if *info != expected {
+		t.Errorf("Unexpected result %+v, expected %+v", *info, expected)
+	}
+
+	if _, err := ParseProcMeminfo("MemTotal: 8131912 kB\nMemFree: 5147464 kB\n"); err == nil {
+		t.Error("Expected error for missing swap values")
+	}
+}
+
+func TestParseFreeOutputOldFormat(t *testing.T) {
+	freeOutput := `             total       used       free     shared    buffers     cached
+Mem:       8131912    2984448    5147464       4044     163520    1678648
+-/+ buffers/cache:    1142280    6989632
+Swap:      2097148     524288    1572860`
+	info, err := ParseFreeOutput(freeOutput)
+	if err != nil {
+		t.Fatal("Unexpected error", err)
+	}
+	expected := MemoryInfo{SwapUse: 524288, CachUse: 1842168, MemUse: 1142280, MemFree: 5147464, MemAvailable: 6989632}
+	if *info != expected {
+		t.Errorf("Unexpected result %+v, expected %+v", *info, expected)
+	}
+}
+
+func TestParseFreeOutputInvalid(t *testing.T) {
+	for _, freeOutput := range []string{
+		"",
+		"              total        used        free      shared  buff/cache   available\nMem:\nSwap: 0 0 0",
+		"              total        used        free      shared  buff/cache   available\nMem: 1 2 3 4 5 6",
+		"              total        used        free      shared  buff/cache   available\nMem: 1 x 3 4 5 6\nSwap: 0 0 0",
+	} {
+		if info, err := ParseFreeOutput(freeOutput); err == nil {
+			t.Errorf("Expected error for %q, got %+v", freeOutput, info)
+		}
+	}
+}

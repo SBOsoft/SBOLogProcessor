@@ -26,6 +26,7 @@ import (
 	"log/slog"
 	"runtime/debug"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -335,11 +336,21 @@ func ReduceToMaxColumnLenKeepingLastPart(str string, colSize int) string {
 	return str[(len(str) - colSize):]
 }
 
+// loadAverageValue converts a load average to a number. Unknown ("") or invalid values are saved
+// as 0 because the columns are NOT NULL; an empty string would fail the insert in strict mode.
+func loadAverageValue(loadAverage string) float64 {
+	v, err := strconv.ParseFloat(loadAverage, 64)
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
 func (sboadb *SBOAnalyticsDB) SaveOSMetrics(uptimeInfo *metrics.UptimeInfo, memoryInfo *metrics.MemoryInfo, hostId int) (bool, error) {
 	var sql string = "INSERT INTO sbo_os_metrics (host_id, metrics_ts, up_duration_minutes, users, " +
 		" load_average1, load_average5, load_average15, " +
 		" swap_use, cache_use, memory_use, memory_free, memory_available) " +
-		" VALUES (?, now(), ?, ?, " +
+		" VALUES (?, ?, ?, ?, " +
 		" ?, ?, ?, " +
 		" ?, ?, ?, ?, ?) "
 	var swapUse int64 = 0
@@ -355,8 +366,9 @@ func (sboadb *SBOAnalyticsDB) SaveOSMetrics(uptimeInfo *metrics.UptimeInfo, memo
 		memFree = memoryInfo.MemFree
 		memAvailable = memoryInfo.MemAvailable
 	}
-	_, err := sboadb.DbInstance.Exec(sql, hostId, uptimeInfo.UpDurationMinutes, uptimeInfo.Users,
-		uptimeInfo.LoadAverage1, uptimeInfo.LoadAverage5, uptimeInfo.LoadAverage15,
+	// metrics_ts is in UTC like all other saved times, see FormatRequestTimestamp
+	_, err := sboadb.DbInstance.Exec(sql, hostId, FormatRequestTimestamp(time.Now()), uptimeInfo.UpDurationMinutes, uptimeInfo.Users,
+		loadAverageValue(uptimeInfo.LoadAverage1), loadAverageValue(uptimeInfo.LoadAverage5), loadAverageValue(uptimeInfo.LoadAverage15),
 		swapUse, cacheUse, memUse, memFree, memAvailable)
 	if err != nil {
 		slog.Error("SaveOSMetrics failed", "hostId", hostId, "uptimeInfo", uptimeInfo, "memoryInfo", memoryInfo, "error", err)
